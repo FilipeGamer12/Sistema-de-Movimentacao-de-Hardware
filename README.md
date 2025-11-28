@@ -187,5 +187,4 @@ WantedBy=multi-user.target
 
 ## 📝 **Licença**
 
-Este projeto pode ser usado, modificado e distribuído livremente ---
-ajuste conforme necessário.
+Este projeto pode ser usado, modificado e distribuído livremente.
