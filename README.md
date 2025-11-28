@@ -123,13 +123,13 @@ Cada registro contém informações como:
 
   Método   Rota            Descrição
   -------- --------------- ----------------------------------
-  GET      `/`             Formulário principal
-  GET      `/lista`        Tabela de registros
-  GET      `/export_csv`   Geração de CSV
-  GET      `/atrasos`      HTML de notificações de atraso
-  POST     `/registrar`    Salvar novo registro
-  POST     `/devolver`     Marcar empréstimo como devolvido
-  POST     `/estender`     Alterar data de devolução
+  GET      `/`             Formulário principal\
+  GET      `/lista`        Tabela de registros\
+  GET      `/export_csv`   Geração de CSV\
+  GET      `/atrasos`      HTML de notificações de atraso\
+  POST     `/registrar`    Salvar novo registro\
+  POST     `/devolver`     Marcar empréstimo como devolvido\
+  POST     `/estender`     Alterar data de devolução\
   POST     `/ocultar`      Ocultar registro
 
 ------------------------------------------------------------------------
