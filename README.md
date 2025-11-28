@@ -34,7 +34,7 @@ e suporta operações de empréstimo com notificação automática de atrasos.
 ## 🗂 **Estrutura do Projeto**
 
     .
-    ├── sistema.py        # Servidor HTTP com backend + frontend embutido
+    ├── sistema_.py        # Servidor HTTP com backend + frontend embutido
     └── dados.json        # Banco de dados simples (gerado automaticamente)
 
 ------------------------------------------------------------------------
@@ -49,7 +49,7 @@ Requisitos:
 Clone o repositório e execute:
 
 ``` bash
-python3 sistema.py
+python3 sistema_.py
 ```
 
 O servidor iniciará em:
@@ -173,7 +173,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/caminho/para/pasta
-ExecStart=/usr/bin/python3 /caminho/para/sistema.py
+ExecStart=/usr/bin/python3 /caminho/para/sistema_.py
 Restart=always
 RestartSec=3
 User=root
