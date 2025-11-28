@@ -4,7 +4,8 @@ Este projeto implementa um **sistema completo de registro e controle de
 movimentações de hardware**, incluindo entradas, saídas e empréstimos,
 utilizando apenas **Python nativo** (`http.server`).\
 Ele fornece uma interface web moderna e responsiva, grava dados em JSON
-e suporta operações de empréstimo com notificação automática de atrasos.
+e suporta operações de empréstimo com notificação automática de atrasos.\
+(Sistema criado para uso interno do DEPPEN)
 
 ------------------------------------------------------------------------
 
