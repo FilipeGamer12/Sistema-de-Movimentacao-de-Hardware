@@ -1,5 +1,3 @@
-# (arquivo completo) test.py — versão atualizada com correções de largura do modal de observações
-
 import json
 import csv
 import datetime
@@ -1396,4 +1394,5 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 if __name__ == "__main__":
     print("Servidor rodando em http://localhost:8000")
+
     ThreadingHTTPServer(("0.0.0.0", 8000), Servidor).serve_forever()
