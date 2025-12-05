@@ -1,3 +1,5 @@
+# (arquivo completo) test.py — versão atualizada com correções de largura do modal de observações
+
 import json
 import csv
 import datetime
@@ -232,6 +234,9 @@ def gerar_html_form(registros):
     .btn-excluir svg { width:18px; height:18px; display:block; margin:0; vertical-align:middle; }
     /* ícones padrão */
     .btn-action svg { width:16px; height:16px; display:block; margin:0; vertical-align:middle; }
+    /* botão observação (amarelo) */
+    .btn-observacao { background: linear-gradient(180deg,#ffd97a,#ffcc33); color:#082010; border:none; }
+    .btn-observacao svg { width:16px; height:16px; display:block; margin:0; vertical-align:middle; }
 
     .topbar {
         display:flex;
@@ -291,6 +296,31 @@ def gerar_html_form(registros):
         padding:8px 12px;
         border-radius:8px;
         cursor:pointer;
+    }
+
+    /* Força layout da tabela de observações para respeitar colgroup */
+    #modal_obs table#obs_table,
+    #modal_extender table#obs_table {
+      table-layout: fixed !important;
+      width: 100% !important;
+      border-collapse: collapse;
+    }
+
+    #modal_obs table#obs_table col:first-child,
+    #modal_extender table#obs_table col:first-child {
+      width: 130px !important;
+    }
+
+    #modal_obs table#obs_table col:last-child,
+    #modal_extender table#obs_table col:last-child {
+      width: auto !important;
+    }
+
+    #modal_obs table#obs_table td:first-child,
+    #modal_extender table#obs_table td:first-child {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
 </style>
@@ -382,9 +412,12 @@ def gerar_html_form(registros):
         <label>Modelo</label>
         <input type="text" name="modelo" placeholder="Ex.: OptiPlex 3080" required>
 
-        <div id="area_emprestimo" style="display:none; margin-top:8px;">
-            <label>Quem pegou emprestado</label>
-            <input type="text" name="emprestado_para" id="emprestado_para">
+        <label style="margin-top:12px;">Observação (opcional)</label>
+        <textarea name="observacao" id="observacao" placeholder="Digite em até 200 caracteres" maxlength="200" style="resize:vertical;"></textarea>
+
+         <div id="area_emprestimo" style="display:none; margin-top:8px;">
+             <label>Quem pegou emprestado</label>
+             <input type="text" name="emprestado_para" id="emprestado_para">
 
             <label>Data prevista de devolução</label>
             <input id="data_retorno" name="data_retorno">
@@ -410,6 +443,32 @@ def gerar_html_form(registros):
             <button class="btn" type="submit">Salvar</button>
             <button type="button" class="btn ghost" onclick="fecharExtensao()">Cancelar</button>
          </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal Observação -->
+<div id="modal_obs" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;z-index:10000;">
+  <div style="background:#1b1b1b;padding:22px;border-radius:10px;width:650px;max-width:90vw;box-shadow:0 6px 18px rgba(0,0,0,0.7);">
+    <h3 style="margin:0 0 8px 0;">Observações</h3>
+    <div style="max-height:420px;overflow:auto;border:1px solid var(--border);padding:10px;border-radius:6px;background:#0f0f0f;color:#e6e6e6;">
+      <table id="obs_table" style="width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;">
+        <colgroup>
+            <col style="width:130px;">   <!-- coluna Data (fina) -->
+            <col style="width:auto;">    <!-- coluna Observação ocupa todo o resto -->
+        </colgroup>
+        <thead><tr><th style="text-align:left;padding:6px;border-bottom:1px solid #222;width:110px;">Data</th><th style="text-align:left;padding:6px;border-bottom:1px solid #222;">Observação</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <form method="POST" action="/adicionar_observacao" id="form_add_obs" style="margin-top:10px;display:flex;gap:8px;flex-direction:column;">
+      <input type="hidden" name="id" id="obs_record_id" value="">
+      <label style="font-size:13px;color:var(--muted);margin:0;">Adicionar observação</label>
+      <textarea name="texto" id="obs_text" required style="min-height:60px;padding:8px;background:#121212;border:1px solid #222;color:#eaeaea;border-radius:6px"></textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button type="submit" class="btn">Adicionar</button>
+        <button type="button" class="btn ghost" onclick="fecharObs()">Fechar</button>
+      </div>
     </form>
   </div>
 </div>
@@ -558,6 +617,42 @@ def gerar_html_form(registros):
         document.getElementById("modal_extender").style.display = "none";
     }
 
+    function abrirObs(id, obs_json){
+        try{
+            var list = [];
+            // suporte para receber tanto string JSON quanto array/objeto JS
+            if (typeof obs_json === 'string') {
+                try { list = JSON.parse(obs_json); } catch (e) { list = []; }
+            } else if (Array.isArray(obs_json)) {
+                list = obs_json;
+            } else if (obs_json && typeof obs_json === 'object') {
+                // já é um objeto (possivelmente array-like)
+                if (Array.isArray(obs_json)) list = obs_json;
+                else list = [];
+            }
+            var tbody = document.querySelector('#obs_table tbody');
+            tbody.innerHTML = '';
+            if (!list || list.length === 0){
+                var tr = document.createElement('tr');
+                tr.innerHTML = '<td style="padding:6px;border-bottom:1px solid #222;color:var(--muted);" colspan="2">Nenhuma observação registrada.</td>';
+                tbody.appendChild(tr);
+            } else {
+                list.forEach(function(o){
+                    var date = o.registrado_em || '';
+                    var text = o.text || '';
+                    var tr = document.createElement('tr');
+                    tr.innerHTML = "<td style='padding:6px;border-bottom:1px solid #222;vertical-align:top;white-space:nowrap;color:var(--muted);'>"+ date +"</td>" +
+                                   "<td style='padding:6px;border-bottom:1px solid #222;white-space:pre-wrap;'>"+ (text || '') +"</td>";
+                    tbody.appendChild(tr);
+                });
+            }
+            try{ document.getElementById('obs_record_id').value = id; }catch(e){}
+            try{ document.getElementById('obs_text').value = ''; }catch(e){}
+            document.getElementById('modal_obs').style.display = 'flex';
+        }catch(e){ console.error('abrirObs erro', e); }
+    }
+    function fecharObs(){ try{ document.getElementById('modal_obs').style.display = 'none'; }catch(e){} }
+
     document.addEventListener("DOMContentLoaded", function() {
         // esse evento aqui mantém compatibilidade com eventuais scripts que esperam isso
         // mas a inicialização crítica já foi feita acima
@@ -591,51 +686,78 @@ def gerar_pagina_lista(registros):
         emprestado_para = r.get("emprestado_para", "")
         data_retorno = r.get("data_retorno", "")
         devolvido = r.get("devolvido", False)
+        observacao = r.get("observacao", "")
 
-        # destaque em vermelho se atraso (emprestimo e não devolvido)
-        atraso_html = ""
+        # --- cálculo de atraso (restitui variáveis removidas) ---
         atrasado = False
-        if tipo == "emprestimo" and data_retorno and not devolvido:
-            try:
-                dt_prev = parse_br_datetime(data_retorno)
-                if dt_prev and dt_prev < datetime.datetime.now():
-                    atraso_html = '<span style="color:#ff6b6b;font-weight:700;">Atrasado</span>'
+        atraso_html = ""
+        try:
+            # precisão de minuto, para compatibilidade com parse_br_datetime
+            now_min = datetime.datetime.now().replace(second=0, microsecond=0)
+            if tipo == "emprestimo" and not devolvido:
+                dt_ret = parse_br_datetime(data_retorno)
+                if dt_ret and dt_ret <= now_min:
                     atrasado = True
-            except:
-                pass
+                    atraso_html = f"<span.style='color:#ff6b6b;font-weight:700;'>Atrasado ({dt_ret.strftime('%d/%m/%Y %H:%M')})</span>"
+        except Exception:
+            atrasado = False
+            atraso_html = ""
+        # --- fim cálculo de atraso ---
 
         botao_devolver = ""
         botao_extender = ""
+        botao_observacao = ""
+        # botão devolver / estender / observação / excluir (sem margens internas, serão alinhados pelo wrapper)
         if tipo == "emprestimo" and not devolvido:
             # botão devolver: ícone apenas, tooltip title
             botao_devolver = (
-                '<form method="POST" action="/devolver" style="display:inline-flex;align-items:center;margin-right:4px;">'
-                f'<input type="hidden" name="id" value="{id_}">'
-                '<button type="submit" class="btn-action btn-devolver" title="Marcar como devolvido">'
-                '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
-                '<path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19l12-12-1.4-1.4z"/>'
-                '</svg>'
-                '</button>'
-                '</form>'
-            )
+                '<form method="POST" action="/devolver" style="display:inline-flex;align-items:center;">'
+                 f'<input type="hidden" name="id" value="{id_}">'
+                 '<button type="submit" class="btn-action btn-devolver" title="Marcar como devolvido">'
+                 '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                 '<path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19l12-12-1.4-1.4z"/>'
+                 '</svg>'
+                 '</button>'
+                 '</form>'
+             )
             # botão estender: ícone apenas, abre modal
             data_retorno_br = normalize_br_datetime_str(data_retorno) if data_retorno else ""
             safe_data = data_retorno_br.replace("'", "\\'")
-            # wrapper inline-flex para manter exata mesma linha de base dos demais botões
+            # wrapper inline-flex para manter exata mesma linha de base dos demais botões (sem margem)
             botao_extender = (
-                f'<span style="display:inline-flex;align-items:center;margin:0 4px;">'
-                f'<button class="btn-action btn-estender" title="Estender empréstimo" onclick="abrirExtensao({id_}, \'{safe_data}\')" type="button">'
-                '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
-                '<path fill="currentColor" d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .34-.03.67-.09.99L19 14.5c.06-.33.09-.67.09-1.01 0-4.42-3.58-8-8-8zM6.09 9.01C6.03 9.33 6 9.66 6 10c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6 0-.34.03-.67.09-.99L6.09 9.01z"/>'
-                '</svg>'
-                '</button>'
-                '</span>'
-            )
+                 f'<span style="display:inline-flex;align-items:center;">'
+                 f'<button class="btn-action btn-estender" title="Estender empréstimo" onclick="abrirExtensao({id_}, \'{safe_data}\')" type="button">'
+                  '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                  '<path fill="currentColor" d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .34-.03.67-.09.99L19 14.5c.06-.33.09-.67.09-1.01 0-4.42-3.58-8-8-8zM6.09 9.01C6.03 9.33 6 9.66 6 10c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6 0-.34.03-.67.09-.99L6.09 9.01z"/>'
+                  '</svg>'
+                  '</button>'
+                 '</span>'
+              )
+
+        # botão observação (sempre aparece). Passa lista de observações serializada para o JS.
+        try:
+            obs_list = r.get("observacoes", []) or []
+            # gerar literal JS: json.dumps produz uma literal válida;
+            # escapamos '</' e apóstrofos simples para poder inserir dentro de atributo em aspas simples
+            safe_obs_json = json.dumps(obs_list, ensure_ascii=False).replace("</", "<\\/").replace("'", "\\'")
+        except Exception:
+            safe_obs_json = "[]"
+
+        # usamos atributo onclick entre aspas simples para não conflitar com as aspas duplas do JSON
+        botao_observacao = (
+            f'<span style="display:inline-flex;align-items:center;">'
+            f'<button class="btn-action btn-observacao" title="Ver observações" onclick=\'abrirObs({id_}, {safe_obs_json})\' type="button">'
+            '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+            '<path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm.88 15h-1.75v-1.75h1.75V17zm0-3.5h-1.75V6.5h1.75v7z"/>'
+            '</svg>'
+            '</button>'
+            '</span>'
+        )
 
         # botão excluir/ocultar (sempre disponível) — pergunta confirmação e marca "oculto" no JSON
         # usa ícone SVG de lixeira (preto) para dentro do botão
         botao_excluir = (
-            '<form method="POST" action="/ocultar" style="display:inline-flex;align-items:center;margin-left:4px;" '
+            '<form method="POST" action="/ocultar" style="display:inline-flex;align-items:center;" '
             'onsubmit="return confirm(\'Tem certeza que deseja apagar este registro?\');">'
             f'<input type="hidden" name="id" value="{id_}">'
             '<button type="submit" class="btn-action btn-excluir" title="Apagar registro">'
@@ -670,7 +792,7 @@ def gerar_pagina_lista(registros):
             f'<td>{data_inicio or ""}</td>'
             f'<td>{data_retorno or ""}</td>'
             f'<td>{status}</td>'
-            f'<td>{botao_devolver} {botao_extender} {botao_excluir}</td>'
+            f'<td><div style="display:flex;gap:6px;align-items:center;">{botao_devolver}{botao_extender}{botao_observacao}{botao_excluir}</div></td>'
             '</tr>'
         )
 
@@ -749,6 +871,34 @@ def gerar_pagina_lista(registros):
     .btn-excluir svg { width:18px; height:18px; display:block; margin:0; vertical-align:middle; }
     /* ícones padrão */
     .btn-action svg { width:16px; height:16px; display:block; margin:0; vertical-align:middle; }
+    /* botão observação (amarelo) */
+    .btn-observacao { background: linear-gradient(180deg,#ffd97a,#ffcc33); color:#082010; border:none; }
+    .btn-observacao svg { width:16px; height:16px; display:block; margin:0; vertical-align:middle; }
+
+    /* Força layout da tabela de observações para respeitar colgroup */
+    #modal_obs table#obs_table,
+    #modal_extender table#obs_table {
+      table-layout: fixed !important;
+      width: 100% !important;
+      border-collapse: collapse;
+    }
+
+    #modal_obs table#obs_table col:first-child,
+    #modal_extender table#obs_table col:first-child {
+      width: 130px !important;
+    }
+
+    #modal_obs table#obs_table col:last-child,
+    #modal_extender table#obs_table col:last-child {
+      width: auto !important;
+    }
+
+    #modal_obs table#obs_table td:first-child,
+    #modal_extender table#obs_table td:first-child {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
 </style>
 </head>
@@ -774,7 +924,7 @@ def gerar_pagina_lista(registros):
         <colgroup>
             <col style="width:2%;">   <!-- ID -->
             <col style="width:5%;">   <!-- Tipo -->
-            <col style="width:16%;">  <!-- Responsável -->
+            <col style="width:15%;">  <!-- Responsável -->
             <col style="width:12%;">  <!-- Emprestado para -->
             <col style="width:4%;">   <!-- Patrimônio -->
             <col style="width:5%;">   <!-- Workflow -->
@@ -785,7 +935,7 @@ def gerar_pagina_lista(registros):
             <col style="width:5%;">   <!-- Data início -->
             <col style="width:5%;">   <!-- Data retorno -->
             <col style="width:5%;">   <!-- Status -->
-            <col style="width:6%;">   <!-- Ação -->
+            <col style="width:7%;">   <!-- Ação -->
         </colgroup>
         <thead>
             <tr>
@@ -828,6 +978,32 @@ def gerar_pagina_lista(registros):
   </div>
 </div>
 
+<!-- Modal Observação -->
+<div id="modal_obs" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;z-index:10000;">
+  <div style="background:#1b1b1b;padding:22px;border-radius:10px;width:650px;max-width:90vw;box-shadow:0 6px 18px rgba(0,0,0,0.7);">
+    <h3 style="margin:0 0 8px 0;">Observações</h3>
+    <div style="max-height:420px;overflow:auto;border:1px solid var(--border);padding:10px;border-radius:6px;background:#0f0f0f;color:#e6e6e6;">
+      <table id="obs_table" style="width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;">
+        <colgroup>
+            <col style="width:130px;">   <!-- coluna Data (fina) -->
+            <col style="width:auto;">    <!-- coluna Observação ocupa todo o resto -->
+        </colgroup>
+        <thead><tr><th style="text-align:left;padding:6px;border-bottom:1px solid #222;width:110px;">Data</th><th style="text-align:left;padding:6px;border-bottom:1px solid #222;">Observação</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <form method="POST" action="/adicionar_observacao" id="form_add_obs" style="margin-top:10px;display:flex;gap:8px;flex-direction:column;">
+      <input type="hidden" name="id" id="obs_record_id" value="">
+      <label style="font-size:13px;color:var(--muted);margin:0;">Adicionar observação</label>
+      <textarea name="texto" id="obs_text" required style="min-height:60px;padding:8px;background:#121212;border:1px solid #222;color:#eaeaea;border-radius:6px"></textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button type="submit" class="btn">Adicionar</button>
+        <button type="button" class="btn ghost" onclick="fecharObs()">Fechar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>
 function abrirExtensao(id, current_date_br){
     try{ document.getElementById('extender_id').value = id; }catch(e){}
@@ -835,6 +1011,40 @@ function abrirExtensao(id, current_date_br){
     try{ document.getElementById('modal_extender').style.display = 'flex'; }catch(e){}
 }
 function fecharExtensao(){ try{ document.getElementById('modal_extender').style.display = 'none'; }catch(e){} }
+
+function abrirObs(id, obs_json){
+    try{
+        var list = [];
+        if (typeof obs_json === 'string') {
+            try { list = JSON.parse(obs_json); } catch(e){ list = []; }
+        } else if (Array.isArray(obs_json)) {
+            list = obs_json;
+        } else if (obs_json && typeof obs_json === 'object') {
+            if (Array.isArray(obs_json)) list = obs_json;
+            else list = [];
+        }
+        var tbody = document.querySelector('#obs_table tbody');
+        tbody.innerHTML = '';
+        if (!list || list.length === 0){
+            var tr = document.createElement('tr');
+            tr.innerHTML = '<td style="padding:6px;border-bottom:1px solid #222;color:var(--muted);" colspan="2">Nenhuma observação registrada.</td>';
+            tbody.appendChild(tr);
+        } else {
+            list.forEach(function(o){
+                var date = o.registrado_em || '';
+                var text = o.text || '';
+                var tr = document.createElement('tr');
+                tr.innerHTML = "<td style='padding:6px;border-bottom:1px solid #222;vertical-align:top;white-space:nowrap;color:var(--muted);'>"+ date +"</td>" +
+                               "<td style='padding:6px;border-bottom:1px solid #222;white-space:pre-wrap;'>"+ (text || '') +"</td>";
+                tbody.appendChild(tr);
+            });
+        }
+        try{ document.getElementById('obs_record_id').value = id; }catch(e){}
+        try{ document.getElementById('obs_text').value = ''; }catch(e){}
+        document.getElementById('modal_obs').style.display = 'flex';
+    }catch(e){ console.error('abrirObs erro', e); }
+}
+function fecharObs(){ try{ document.getElementById('modal_obs').style.display = 'none'; }catch(e){} }
 </script>
 
 <script>
@@ -999,6 +1209,11 @@ class Servidor(BaseHTTPRequestHandler):
             workflow = campos.get("workflow", [""])[0]
             marca = campos.get("marca", [""])[0]
             modelo = campos.get("modelo", [""])[0]
+            observacao = campos.get("observacao", [""])[0].strip()
+
+            # validação servidor-side do tamanho da observação
+            if observacao and len(observacao) > 200:
+                return self.responder_error("Observação deve ter no máximo 200 caracteres.")
 
             novo = {
                 "id": novo_id,
@@ -1011,8 +1226,14 @@ class Servidor(BaseHTTPRequestHandler):
                 "hardware": hardware,
                 "marca": marca,
                 "modelo": modelo,
-                "devolvido": False
-            }
+                "devolvido": False,
+                "observacao": observacao,
+                # grava lista de observações (compatível com futuras adições)
+                "observacoes": ([{
+                    "text": observacao,
+                    "registrado_em": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                }] if observacao else [])
+             }
 
             if tipo == "emprestimo":
                 novo["emprestado_para"] = campos.get("emprestado_para", [""])[0]
@@ -1104,6 +1325,45 @@ class Servidor(BaseHTTPRequestHandler):
             # redireciona para lista
             self.redirect("/lista")
 
+        elif path == "/adicionar_observacao":
+            # adiciona uma observação a um registro (anexa em "observacoes")
+            try:
+                id_reg = int(campos.get("id", ["0"])[0])
+            except:
+                id_reg = 0
+            texto = campos.get("texto", [""])[0].strip()
+
+            if not texto:
+                return self.responder_error("Observação vazia.")
+
+            with open(ARQUIVO, "r", encoding="utf-8") as f:
+                registros = json.load(f)
+
+            updated = False
+            for r in registros:
+                try:
+                    if int(r.get("id", 0)) == id_reg:
+                        if "observacoes" not in r or not isinstance(r["observacoes"], list):
+                            r["observacoes"] = []
+                        novo = {
+                            "text": texto,
+                            "registrado_em": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                        }
+                        r["observacoes"].append(novo)
+                        # manter último texto também em 'observacao' para compatibilidade
+                        r["observacao"] = texto
+                        updated = True
+                except:
+                    pass
+
+            if updated:
+                with open(ARQUIVO, "w", encoding="utf-8") as f:
+                    json.dump(registros, f, ensure_ascii=False, indent=4)
+
+            # volta para a página de lista (tenta referer se disponível)
+            referer = self.headers.get("Referer", "/lista")
+            self.redirect(referer)
+
         else:
             self.send_error(404, "Ação desconhecida")
 
@@ -1118,8 +1378,8 @@ class Servidor(BaseHTTPRequestHandler):
         conteudo = (
             "<!doctype html><html><head><meta charset='utf-8'><title>Erro</title></head>"
             "<body style='background:#0f0f10;color:#eaeaea;font-family:Inter,Arial;padding:20px;'>"
-            f"<h2>Erro</h2><p>{mensagem}</p>"
-            "<p><a href='/' style='color:#3aa0ff'>Voltar</a></p></body></html>"
+            "<h2>Erro</h2><p>{}</p>"
+            "<p><a href='/' style='color:#3aa0ff'>Voltar</a></p></body></html>".format(mensagem)
         )
         self.send_response(400)
         self.send_header("Content-Type", "text/html; charset=utf-8")
