@@ -1,9 +1,8 @@
-# (arquivo completo) test.py — versão atualizada: painel de pendências separado do formulário
 import json
 import csv
 import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 from socketserver import ThreadingMixIn
 
 ARQUIVO = "dados.json"
@@ -664,7 +663,14 @@ def gerar_html_form(registros):
             enableTime: true,
             time_24hr: true,
             dateFormat: "d/m/Y H:i",
-            locale: "pt"
+            locale: "pt",
+            theme: "light",  // Força tema claro
+            // Desabilita a detecção automática de tema escuro
+            onReady: function(selectedDates, dateStr, instance) {
+                // Remove qualquer classe de tema escuro que possa ter sido adicionada
+                instance.calendarContainer.classList.remove("flatpickr-dark");
+                instance.calendarContainer.classList.add("flatpickr-light");
+            }
         });
     }
 
@@ -816,6 +822,11 @@ def gerar_html_form(registros):
 
 # ----------------------------- LISTA / REGISTROS PAGE -----------------------------
 def gerar_pagina_lista(registros):
+    # --- CORREÇÃO: gerar responsaveis_html localmente (evita NameError) ---
+    responsaveis_html = ""
+    for r in RESPONSAVEIS:
+        responsaveis_html += '<option value="{}">{}</option>'.format(r, r)
+
     # gera linhas da tabela
     linhas = ""
     for r in registros:
@@ -949,6 +960,7 @@ def gerar_pagina_lista(registros):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Registros Cadastrados</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
 <style>
     :root {
         --bg:#0f0f10; --card:#111; --muted:#9aa0a6; --border:#222; --accent:#4caf50;
@@ -1038,6 +1050,66 @@ def gerar_pagina_lista(registros):
       text-overflow: ellipsis;
     }
 
+    /* Modal Export CSS: deixa visual igual ao formulário */
+    #modal_export {
+        display:none;
+        position:fixed;
+        top:0; left:0; width:100%; height:100%;
+        background:rgba(0,0,0,0.6);
+        align-items:center; justify-content:center;
+        z-index:11000;
+    }
+    #modal_export .modal-inner {
+        background:#1b1b1b;
+        padding:18px;
+        border-radius:10px;
+        width:560px;
+        max-width:94vw;
+        box-shadow:0 6px 18px rgba(0,0,0,0.7);
+    }
+    #modal_export h3 { margin:0 0 10px 0; }
+
+    /* grid de filtros: checkbox (esq) | controle (dir) */
+    #modal_export .export-grid {
+        display:grid;
+        grid-template-columns: 220px 1fr;
+        gap:10px 12px;
+        align-items:center;
+    }
+    #modal_export .export-left { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:14px; }
+    #modal_export .export-left input[type="checkbox"] { width:16px; height:16px; }
+    /* usar mesmo estilo dos inputs do formulário */
+    #modal_export .export-right input[type="text"],
+    #modal_export .export-right select {
+        width:100%;
+        box-sizing:border-box;
+        padding:8px 10px;
+        margin-top:0;
+        background:var(--input-bg);
+        border:1px solid var(--border);
+        color: #eaeaea;
+        border-radius:8px;
+        outline:none;
+        font-size:14px;
+        -webkit-appearance: none;
+        appearance: none;
+    }
+    /* força opções com tema escuro (alguns navegadores usam default claro) */
+    #modal_export .export-right select option {
+        color: #eaeaea;
+        background: #1b1b1b;
+    }
+    #modal_export .export-right .two-inline { display:flex; gap:8px; }
+    #modal_export .export-right .two-inline input { flex:1; }
+
+    /* responsivo: empilha em telas pequenas */
+    @media (max-width:640px) {
+        #modal_export .export-grid {
+            grid-template-columns: 1fr;
+        }
+        #modal_export .export-left { padding:8px 0; }
+    }
+
 </style>
 </head>
 <body>
@@ -1050,9 +1122,8 @@ def gerar_pagina_lista(registros):
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <input id="search" class="search" placeholder="Pesquisar (responsável, patrimônio, hardware, modelo...)">
             <button id="btnToggleOrder" class="btn ghost" type="button" title="Alternar ordem por ID">Ordem: Mais novo → antigo</button>
-            <form method="GET" action="/export_csv" style="margin:0;">
-                <button class="btn" type="submit">Exportar CSV</button>
-            </form>
+            <!-- Agora abre modal com filtros -->
+            <button id="btnExportCsv" class="btn" type="button">Exportar CSV</button>
             <a class="btn ghost" href="/">Voltar</a>
         </div>
     </div>
@@ -1100,6 +1171,96 @@ def gerar_pagina_lista(registros):
     </div>
 </div>
 
+<!-- Modal de Export CSV (reorganizado em grid: checkbox left | control right) -->
+<div id="modal_export">
+  <div class="modal-inner">
+    <h3>Exportar CSV — Filtros</h3>
+    <form id="form_export" method="GET" action="/export_csv" style="display:flex;flex-direction:column;gap:12px;">
+      <div class="export-grid">
+        <div class="export-left"><label><input type="checkbox" name="f_all" id="f_all"> <span>Todos (exporta tudo)</span></label></div>
+        <div class="export-right"><div class="note">Selecionar para exportar todos os registros</div></div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_manual" id="f_manual"> <span>Manual (exporta o que estou vendo)</span></label></div>
+        <div class="export-right"><div class="note">Exporta apenas os IDs visíveis na tabela</div></div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_tipo" id="f_tipo"> <span>Tipo</span></label></div>
+        <div class="export-right">
+          <select name="tipo_value" id="tipo_value">
+            <option value="">-- selecione --</option>
+            <option value="entrada">Entrada</option>
+            <option value="saida">Saída</option>
+            <option value="emprestimo">Empréstimo</option>
+          </select>
+        </div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_responsavel" id="f_responsavel"> <span>Responsável</span></label></div>
+        <div class="export-right">
+          <select name="responsavel_value" id="responsavel_value">
+            <option value="">-- selecione --</option>
+""" + responsaveis_html + """
+          </select>
+        </div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_emprestado_para" id="f_emprestado_para"> <span>Emprestado para</span></label></div>
+        <div class="export-right"><input type="text" name="emprestado_para_value" id="emprestado_para_value" placeholder="Texto a buscar"></div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_patrimonio" id="f_patrimonio"> <span>Patrimônio</span></label></div>
+        <div class="export-right"><input type="text" name="patrimonio_value" id="patrimonio_value" placeholder="Ex.: 1234567"></div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_workflow" id="f_workflow"> <span>Workflow</span></label></div>
+        <div class="export-right"><input type="text" name="workflow_value" id="workflow_value" placeholder="Ex.: P-1234567"></div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_motivo" id="f_motivo"> <span>Motivo</span></label></div>
+        <div class="export-right">
+          <select name="motivo_value" id="motivo_value">
+            <option value="">-- selecione --</option>
+            <option value="formatação">Formatação</option>
+            <option value="manutenção">Manutenção</option>
+            <option value="reparo">Reparo</option>
+            <option value="outros">Outros</option>
+          </select>
+        </div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_hardware" id="f_hardware"> <span>Hardware</span></label></div>
+        <div class="export-right">
+          <select name="hardware_value" id="hardware_value">
+            <option value="">-- selecione --</option>
+            <option value="Desktop">Desktop</option>
+            <option value="Notebook">Notebook</option>
+            <option value="Teclado/Mouse">Teclado/Mouse</option>
+            <option value="Monitor">Monitor</option>
+            <option value="outros">Outros</option>
+          </select>
+        </div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_marca" id="f_marca"> <span>Marca</span></label></div>
+        <div class="export-right"><input type="text" name="marca_value" id="marca_value" placeholder="Ex.: Dell"></div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_modelo" id="f_modelo"> <span>Modelo</span></label></div>
+        <div class="export-right"><input type="text" name="modelo_value" id="modelo_value" placeholder="Ex.: OptiPlex"></div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_data" id="f_data"> <span>Data (intervalo)</span></label></div>
+        <div class="export-right">
+          <div class="two-inline">
+            <input type="text" name="date_from" id="date_from" placeholder="De (DD/MM/AAAA HH:mm)">
+            <input type="text" name="date_to" id="date_to" placeholder="Até (DD/MM/AAAA HH:mm)">
+          </div>
+        </div>
+
+        <!-- campo oculto que receberá os ids quando Manual for usado -->
+        <div class="export-left"></div>
+        <div class="export-right"><input type="hidden" name="manual_ids" id="manual_ids" value=""></div>
+
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+        <button type="submit" class="btn">Exportar</button>
+        <button type="button" class="btn ghost" id="btnCancelExport">Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Modals (lista) -->
 <div id="modal_extender" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;z-index:9999;">
   <div style="background:#1b1b1b;padding:20px;border-radius:10px;width:320px;box-shadow:0 6px 18px rgba(0,0,0,0.7);">
@@ -1141,6 +1302,8 @@ def gerar_pagina_lista(registros):
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/pt.js"></script>
 <script>
 function abrirExtensao(id, current_date_br){
     try{ document.getElementById('extender_id').value = id; }catch(e){}
@@ -1215,6 +1378,87 @@ function fecharObs(){ try{ document.getElementById('modal_obs').style.display = 
         });
         try { sortTableById(true); } catch(e){}
     })();
+
+    // Export CSV modal logic (flatpickr date_to predefinido com hora atual do cliente)
+    (function(){
+        const btnOpen = document.getElementById("btnExportCsv");
+        const modal = document.getElementById("modal_export");
+        const btnCancel = document.getElementById("btnCancelExport");
+        const form = document.getElementById("form_export");
+
+        // inicializar flatpickr para todos os campos de data na página de lista
+        try {
+            flatpickr("#date_from", {
+                enableTime: true,
+                time_24hr: true,
+                dateFormat: "d/m/Y H:i",
+                locale: "pt",
+                theme: "light"  // Força tema claro na página de lista também
+            });
+            flatpickr("#date_to", {
+                enableTime: true,
+                time_24hr: true,
+                dateFormat: "d/m/Y H:i",
+                locale: "pt",
+                theme: "light"  // Força tema claro na página de lista também
+            });
+            // Inicializar também para o campo de estender empréstimo
+            flatpickr("#extender_data", {
+                enableTime: true,
+                time_24hr: true,
+                dateFormat: "d/m/Y H:i",
+                locale: "pt",
+                theme: "light"  // Força tema claro na página de lista também
+            });
+        } catch(e) {
+            console.warn("Erro ao inicializar flatpickr:", e);
+        }
+
+        btnOpen.addEventListener("click", function(){
+            modal.style.display = "flex";
+            // reset manual ids hidden
+            document.getElementById("manual_ids").value = "";
+
+            // definir a data final (date_to) com a hora atual do cliente por padrão
+            try {
+                // Usa flatpickr para setar a data atual
+                const fp = document.querySelector("#date_to")._flatpickr;
+                if (fp && typeof fp.setDate === 'function') {
+                    fp.setDate(new Date(), true);
+                } else {
+                    // fallback: setar valor do input manualmente no mesmo formato usado no flatpickr
+                    function pad(n){ return n.toString().padStart(2,'0'); }
+                    const d = new Date();
+                    const s = pad(d.getDate()) + '/' + pad(d.getMonth()+1) + '/' + d.getFullYear() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+                    const el = document.getElementById("date_to");
+                    if (el) el.value = s;
+                }
+            } catch(e) {
+                console.warn("Não foi possível predefinir date_to:", e);
+            }
+        });
+        btnCancel.addEventListener("click", function(){
+            modal.style.display = "none";
+        });
+
+        // quando enviar, se Manual está marcado coletar os ids das linhas visíveis
+        form.addEventListener("submit", function(ev){
+            const manualChecked = document.getElementById("f_manual").checked;
+            if (manualChecked) {
+                const rows = document.querySelectorAll("#tabela tbody tr");
+                const ids = [];
+                rows.forEach(r => {
+                    if (r.style.display !== "none") {
+                        const id = r.dataset.id || r.getAttribute("data-id");
+                        if (id) ids.push(id);
+                    }
+                });
+                document.getElementById("manual_ids").value = ids.join(",");
+            }
+            // se "Todos" estiver checado, não precisa fazer nada — o servidor terá f_all
+            // modal será fechado pelo navegador quando redirecionar p/ download
+        });
+    })();
 </script>
 
 </body>
@@ -1229,7 +1473,9 @@ function fecharObs(){ try{ document.getElementById('modal_obs').style.display = 
 class Servidor(BaseHTTPRequestHandler):
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        # manter raw_path para poder ler a querystring quando necessário
+        raw_path = self.path
+        path = raw_path.split("?", 1)[0]
         if path == "/":
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
@@ -1241,26 +1487,126 @@ class Servidor(BaseHTTPRequestHandler):
             self.responder(gerar_pagina_lista(registros))
 
         elif path == "/export_csv":
+            # carregar registros e aplicar filtros vindos via querystring
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
 
+            # parse query
+            qs = {}
+            try:
+                qs = parse_qs(urlparse(self.path).query)
+            except Exception:
+                qs = {}
+
+            def has(key):
+                return key in qs and qs.get(key)
+
+            # START filtering
+            filtered = list(registros)
+
+            # if 'Todos' selected -> export all (não filtra)
+            if has('f_all'):
+                filtered = list(registros)
+            else:
+                # Manual: list of ids to keep (if provided)
+                if has('f_manual') and qs.get('manual_ids'):
+                    ids = []
+                    try:
+                        ids = [int(x) for x in qs.get('manual_ids', [''])[0].split(',') if x.strip()!='']
+                    except:
+                        ids = []
+                    filtered = [r for r in filtered if (r.get('id') is not None and int(r.get('id')) in ids)]
+
+                # tipo filter
+                if has('f_tipo') and qs.get('tipo_value'):
+                    tipo_v = qs.get('tipo_value', [''])[0].strip()
+                    if tipo_v:
+                        filtered = [r for r in filtered if (str(r.get('tipo','')) == tipo_v)]
+
+                # responsavel
+                if has('f_responsavel') and qs.get('responsavel_value'):
+                    rv = qs.get('responsavel_value', [''])[0].strip().lower()
+                    if rv:
+                        filtered = [r for r in filtered if (str(r.get('responsavel','')).strip().lower() == rv)]
+
+                # emprestado_para (substring case-insensitive)
+                if has('f_emprestado_para') and qs.get('emprestado_para_value'):
+                    qv = qs.get('emprestado_para_value', [''])[0].strip().lower()
+                    if qv:
+                        filtered = [r for r in filtered if qv in str(r.get('emprestado_para','')).lower()]
+
+                # patrimonio (substring)
+                if has('f_patrimonio') and qs.get('patrimonio_value'):
+                    pv = qs.get('patrimonio_value', [''])[0].strip().lower()
+                    if pv:
+                        filtered = [r for r in filtered if pv in str(r.get('patrimonio','')).lower()]
+
+                # workflow (substring)
+                if has('f_workflow') and qs.get('workflow_value'):
+                    wv = qs.get('workflow_value', [''])[0].strip().lower()
+                    if wv:
+                        filtered = [r for r in filtered if wv in str(r.get('workflow','')).lower()]
+
+                # motivo (exact match)
+                if has('f_motivo') and qs.get('motivo_value'):
+                    mv = qs.get('motivo_value', [''])[0].strip().lower()
+                    if mv:
+                        filtered = [r for r in filtered if str(r.get('motivo','')).strip().lower() == mv]
+
+                # hardware
+                if has('f_hardware') and qs.get('hardware_value'):
+                    hv = qs.get('hardware_value', [''])[0].strip().lower()
+                    if hv:
+                        filtered = [r for r in filtered if str(r.get('hardware','')).strip().lower() == hv]
+
+                # marca (substring)
+                if has('f_marca') and qs.get('marca_value'):
+                    mvv = qs.get('marca_value', [''])[0].strip().lower()
+                    if mvv:
+                        filtered = [r for r in filtered if mvv in str(r.get('marca','')).lower()]
+
+                # modelo (substring)
+                if has('f_modelo') and qs.get('modelo_value'):
+                    modv = qs.get('modelo_value', [''])[0].strip().lower()
+                    if modv:
+                        filtered = [r for r in filtered if modv in str(r.get('modelo','')).lower()]
+
+                # date range on data_inicio
+                if has('f_data'):
+                    from_s = qs.get('date_from', [''])[0].strip()
+                    to_s = qs.get('date_to', [''])[0].strip()
+                    dt_from = parse_br_datetime(from_s) if from_s else None
+                    dt_to = parse_br_datetime(to_s) if to_s else None
+                    if dt_from or dt_to:
+                        def in_range(r):
+                            di = parse_br_datetime(r.get('data_inicio',''))
+                            if not di:
+                                return False
+                            if dt_from and di < dt_from:
+                                return False
+                            if dt_to and di > dt_to:
+                                return False
+                            return True
+                        filtered = [r for r in filtered if in_range(r)]
+
+            # campos do CSV (mesmos de antes)
             campos = ["id", "tipo", "responsavel", "emprestado_para", "patrimonio", "workflow", "motivo",
                       "hardware", "marca", "modelo", "data_inicio", "data_retorno", "devolvido",
                       "client_ip", "registrado_em"]
 
             from io import StringIO
-            csv_buffer = StringIO();
+            csv_buffer = StringIO()
             writer = csv.DictWriter(csv_buffer, fieldnames=campos)
             writer.writeheader()
-            for r in registros:
+            for r in filtered:
                 row = {k: (r.get(k, "") if r.get(k, "") is not None else "") for k in campos if k not in ("client_ip", "registrado_em")}
                 oculto = r.get("oculto_meta", {}) or {}
                 row["client_ip"] = oculto.get("client_ip", "")
                 row["registrado_em"] = oculto.get("registrado_em", "")
                 writer.writerow(row)
 
-            csv_data = csv_buffer.getvalue();
-            csv_buffer.close();
+            csv_data = csv_buffer.getvalue()
+            csv_buffer.close()
 
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
@@ -1601,13 +1947,19 @@ class Servidor(BaseHTTPRequestHandler):
         self.wfile.write(conteudo.encode("utf-8"))
 
     def redirect(self, url):
-        self.send_response(302)
+        self.send_response(303)
         self.send_header("Location", url)
         self.end_headers()
 
-class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-    daemon_threads = True
 
 if __name__ == "__main__":
+    server_address = ('', 8000)
+    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+    httpd = ThreadedHTTPServer(server_address, Servidor)
     print("Servidor rodando em http://localhost:8000")
-    ThreadingHTTPServer(("0.0.0.0", 8000), Servidor).serve_forever()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    httpd.server_close()
