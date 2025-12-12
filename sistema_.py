@@ -1,6 +1,7 @@
 import json
 import csv
 import datetime
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 from socketserver import ThreadingMixIn
@@ -64,12 +65,44 @@ def normalize_br_datetime_str(dt_str):
     return dt.strftime("%d/%m/%Y %H:%M")
 
 
+def calcular_status(registro):
+    """
+    Calcula o status do registro para exportação CSV.
+    Retorna uma string com o status.
+    """
+    tipo = registro.get("tipo", "")
+    devolvido = registro.get("devolvido", False)
+    estoque = registro.get("estoque", False)
+    status_extra = registro.get("status_extra", "")
+    
+    if devolvido:
+        if status_extra:
+            return status_extra
+        else:
+            return "Devolvido"
+    
+    # Verificar se é empréstimo atrasado
+    if tipo == "emprestimo" and not devolvido:
+        dt_raw = registro.get("data_retorno", "")
+        dt = parse_br_datetime(dt_raw)
+        if dt and dt <= datetime.datetime.now():
+            return f"Atrasado ({dt.strftime('%d/%m/%Y')})"
+    
+    if estoque and tipo == "entrada":
+        return "Em estoque"
+    
+    if tipo == "emprestimo":
+        return "Ativo"
+    
+    return ""  # Para entradas e saídas não devolvidas
+
+
 def gerar_notificacoes_atraso_html(registros):
     """(Deprecated) Mantido para compatibilidade — usar gerar_pendencias_html no frontend."""
     atrasados = []
     now_min = datetime.datetime.now().replace(second=0, microsecond=0)
     for r in registros:
-        if r.get("oculto", False):
+        if r.get("oculto", False) or r.get("estoque", False):
             continue
         if r.get("tipo") == "emprestimo" and not r.get("devolvido", False):
             dt_raw = r.get("data_retorno", "")
@@ -109,7 +142,7 @@ def gerar_pendencias_html(registros):
     # map workflow -> list of registros (para busca rápida)
     workflow_map = {}
     for r in registros:
-        if r.get("oculto", False):
+        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
             continue
         wf = (r.get("workflow") or "").strip()
         if wf:
@@ -117,7 +150,7 @@ def gerar_pendencias_html(registros):
 
     # achar atrasos (emprestimo com data_retorno passada)
     for r in registros:
-        if r.get("oculto", False):
+        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
             continue
         if r.get("tipo") == "emprestimo" and not r.get("devolvido", False):
             dt_raw = r.get("data_retorno", "")
@@ -127,7 +160,7 @@ def gerar_pendencias_html(registros):
 
     # pendências de entrada (motivo != outros)
     for r in registros:
-        if r.get("oculto", False):
+        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
             continue
         if r.get("tipo") != "entrada":
             continue
@@ -527,8 +560,10 @@ def gerar_html_form(registros):
                 <div class="two-columns">
                     <div>
                         <label>Patrimônio (7 dígitos)</label>
-                        <input type="text" name="patrimonio" id="patrimonio" pattern="\\d{7,}" inputmode="numeric" placeholder="Ex.: 1234567" required
-                               title="Digite apenas números. Mínimo 7 dígitos.">
+                        <!-- REMOVIDO: required -->
+                        <input type="text" name="patrimonio" id="patrimonio" pattern="\\d{7,}" inputmode="numeric" placeholder="Ex.: 1234567"
+                               title="Digite apenas números. Mínimo 7 dígitos. Opcional para Teclado/Mouse.">
+                        <div class="note" style="margin-top:2px;font-size:12px;">Opcional para Teclado/Mouse</div>
                     </div>
                     <div>
                         <label>Nº WorkFlow</label>
@@ -744,9 +779,21 @@ def gerar_html_form(registros):
 
     function validarFormulario() {
         const patr = document.getElementById("patrimonio").value.trim();
-        if (!/^[0-9]{7,}$/.test(patr)) {
-            alert("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos.");
-            return false;
+        const hardware = document.getElementById("hardware_select").value;
+        
+        // Se não for Teclado/Mouse e o patrimônio foi preenchido, valida
+        if (hardware !== "Teclado/Mouse" && patr !== "") {
+            if (!/^[0-9]{7,}$/.test(patr)) {
+                alert("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos.");
+                return false;
+            }
+        }
+        // Se for Teclado/Mouse, o patrimônio é opcional, mas se preenchido deve ser válido
+        else if (hardware === "Teclado/Mouse" && patr !== "") {
+            if (!/^[0-9]{7,}$/.test(patr)) {
+                alert("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos, ou deixe em branco para Teclado/Mouse.");
+                return false;
+            }
         }
 
         const workflow = document.getElementById("workflow").value.trim();
@@ -847,6 +894,7 @@ def gerar_pagina_lista(registros):
         data_retorno = r.get("data_retorno", "")
         devolvido = r.get("devolvido", False)
         observacao = r.get("observacao", "")
+        estoque = r.get("estoque", False)
 
         # --- cálculo de atraso ---
         atrasado = False
@@ -910,6 +958,21 @@ def gerar_pagina_lista(registros):
             '</span>'
         )
 
+        # botão estoque (apenas para entradas não devolvidas)
+        botao_estoque = ""
+        if tipo == "entrada" and not devolvido:
+            estoque_status = "Remover do estoque" if estoque else "Colocar em estoque"
+            botao_estoque = (
+                f'<form method="POST" action="/alternar_estoque" style="display:inline-flex;align-items:center;margin:0;">'
+                f'<input type="hidden" name="id" value="{id_}">'
+                f'<button type="submit" class="btn-action btn-estoque" title="{estoque_status}">'
+                '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                '<path fill="currentColor" d="M21 16.5c0 .38-.21.71-.53.88l-7.9 4.44c-.16.12-.36.18-.57.18-.21 0-.41-.06-.57-.18l-7.9-4.44A.991.991 0 0 1 3 16.5v-9c0-.38.21-.71.53-.88l7.9-4.44c.16-.12.36-.18.57-.18.21 0 .41.06.57.18l7.9 4.44c.32.17.53.5.53.88v9zM12 4.15L6.04 7.5 12 10.85l5.96-3.35L12 4.15zM5 15.91l6 3.38v-6.71L5 9.21v6.7zm14 0v-6.7l-6 3.37v6.71l6-3.38z"/>'
+                '</svg>'
+                '</button>'
+                '</form>'
+            )
+
         botao_excluir = (
             '<form method="POST" action="/ocultar" style="display:inline-flex;align-items:center;" '
             'onsubmit="return confirm(\'Tem certeza que deseja apagar este registro?\');">'
@@ -922,7 +985,7 @@ def gerar_pagina_lista(registros):
             '</form>'
         )
 
-        # prioridade: Devolvido > Atrasado > Ativo
+        # prioridade: Devolvido > Atrasado > Em estoque > Ativo
         if devolvido:
             # se há status_extra, mostrar ele (ex.: "devolvido (N)")
             if r.get("status_extra"):
@@ -931,6 +994,8 @@ def gerar_pagina_lista(registros):
                 status = "Devolvido"
         elif atrasado:
             status = atraso_html
+        elif estoque and tipo == "entrada":
+            status = "Em estoque"
         else:
             status = "Ativo" if tipo == "emprestimo" else ""
 
@@ -949,7 +1014,7 @@ def gerar_pagina_lista(registros):
             f'<td>{data_inicio or ""}</td>'
             f'<td>{data_retorno or ""}</td>'
             f'<td>{status}</td>'
-            f'<td><div style="display:flex;gap:6px;align-items:center;">{botao_devolver}{botao_extender}{botao_observacao}{botao_excluir}</div></td>'
+            f'<td><div style="display:flex;gap:6px;align-items:center;">{botao_devolver}{botao_extender}{botao_observacao}{botao_estoque}{botao_excluir}</div></td>'
             '</tr>'
         )
 
@@ -1018,6 +1083,11 @@ def gerar_pagina_lista(registros):
     .btn-excluir {
         background: linear-gradient(180deg, #ff8b8b, #ff6b6b);
         color:#160000;
+        border: none;
+    }
+    .btn-estoque {
+        background: linear-gradient(180deg, #3a6ea5, #1e3a5f);
+        color:#ffffff;
         border: none;
     }
     .btn-excluir svg { width:18px; height:18px; display:block; margin:0; vertical-align:middle; }
@@ -1589,20 +1659,25 @@ class Servidor(BaseHTTPRequestHandler):
                             return True
                         filtered = [r for r in filtered if in_range(r)]
 
-            # campos do CSV (mesmos de antes)
+            # campos do CSV (incluindo status)
             campos = ["id", "tipo", "responsavel", "emprestado_para", "patrimonio", "workflow", "motivo",
-                      "hardware", "marca", "modelo", "data_inicio", "data_retorno", "devolvido",
-                      "client_ip", "registrado_em"]
+                      "hardware", "marca", "modelo", "data_inicio", "data_retorno", "devolvido", "estoque",
+                      "status", "client_ip", "registrado_em"]
 
             from io import StringIO
             csv_buffer = StringIO()
             writer = csv.DictWriter(csv_buffer, fieldnames=campos)
             writer.writeheader()
             for r in filtered:
-                row = {k: (r.get(k, "") if r.get(k, "") is not None else "") for k in campos if k not in ("client_ip", "registrado_em")}
+                row = {k: (r.get(k, "") if r.get(k, "") is not None else "") for k in campos 
+                       if k not in ("client_ip", "registrado_em", "status")}
                 oculto = r.get("oculto_meta", {}) or {}
                 row["client_ip"] = oculto.get("client_ip", "")
                 row["registrado_em"] = oculto.get("registrado_em", "")
+                row["estoque"] = "Sim" if r.get("estoque") else "Não"
+                row["devolvido"] = "Sim" if r.get("devolvido") else "Não"
+                # Adiciona o status calculado
+                row["status"] = calcular_status(r)
                 writer.writerow(row)
 
             csv_data = csv_buffer.getvalue()
@@ -1677,6 +1752,14 @@ class Servidor(BaseHTTPRequestHandler):
                     return self.responder_error("Descreva o hardware (campo obrigatório quando selecionar 'Outros').")
                 hardware = hardware_outros
 
+            # Validação do patrimônio - obrigatório para todos EXCETO "Teclado/Mouse"
+            if hardware != "Teclado/Mouse" and not patrimonio:
+                return self.responder_error("Campo 'Patrimônio' é obrigatório para este hardware.")
+            
+            # Se for "Teclado/Mouse", o patrimônio pode ser vazio ou ter 7+ dígitos
+            if patrimonio and not re.match(r'^\d{7,}$', patrimonio):
+                return self.responder_error("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos.")
+
             workflow = campos.get("workflow", [""])[0]
             marca = campos.get("marca", [""])[0]
             modelo = campos.get("modelo", [""])[0]
@@ -1697,6 +1780,7 @@ class Servidor(BaseHTTPRequestHandler):
                 "marca": marca,
                 "modelo": modelo,
                 "devolvido": False,
+                "estoque": False,
                 "observacao": observacao,
                 "observacoes": ([{
                     "text": observacao,
@@ -1789,7 +1873,8 @@ class Servidor(BaseHTTPRequestHandler):
                 "hardware": original.get("hardware", ""),
                 "marca": original.get("marca", ""),
                 "modelo": original.get("modelo", ""),
-                "devolvido": False
+                "devolvido": False,
+                "estoque": False
             }
             # manter campos específicos de empréstimo se existirem (mas normalmente não)
             if original.get("emprestado_para"):
@@ -1805,12 +1890,13 @@ class Servidor(BaseHTTPRequestHandler):
                 "registrado_em": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
             }
 
-            # atualiza registro original: marca devolvido True e adiciona status_extra com novo id
+            # atualiza registro original: marca devolvido True, remove estoque e adiciona status_extra com novo id
             updated = False
             for r in registros:
                 try:
                     if int(r.get("id", 0)) == id_reg:
                         r["devolvido"] = True
+                        r["estoque"] = False  # Remove do estoque
                         r["status_extra"] = f"Devolvido (ID: {novo_id})"
                         updated = True
                         break
@@ -1822,6 +1908,30 @@ class Servidor(BaseHTTPRequestHandler):
 
             with open(ARQUIVO, "w", encoding="utf-8") as f:
                 json.dump(registros, f, ensure_ascii=False, indent=4)
+
+            self.redirect("/lista")
+
+        elif path == "/alternar_estoque":
+            try:
+                id_reg = int(campos.get("id", ["0"])[0])
+            except:
+                id_reg = 0
+            with open(ARQUIVO, "r", encoding="utf-8") as f:
+                registros = json.load(f)
+
+            updated = False
+            for r in registros:
+                try:
+                    if int(r.get("id", 0)) == id_reg:
+                        # Alterna o estado de estoque
+                        r["estoque"] = not r.get("estoque", False)
+                        updated = True
+                except:
+                    pass
+
+            if updated:
+                with open(ARQUIVO, "w", encoding="utf-8") as f:
+                    json.dump(registros, f, ensure_ascii=False, indent=4)
 
             self.redirect("/lista")
 
