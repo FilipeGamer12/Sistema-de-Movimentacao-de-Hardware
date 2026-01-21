@@ -5,6 +5,7 @@ import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 from socketserver import ThreadingMixIn
+from zoneinfo import ZoneInfo
 
 ARQUIVO = "dados.json"
 
@@ -65,6 +66,24 @@ def normalize_br_datetime_str(dt_str):
     return dt.strftime("%d/%m/%Y %H:%M")
 
 
+def sp_now_naive():
+    """
+    Retorna datetime naive (sem tzinfo) representando o horário atual em America/Sao_Paulo,
+    com segundos/microseconds zerados. Em fallback, usa o horário do servidor.
+    """
+    try:
+        tz = ZoneInfo("America/Sao_Paulo")
+        now = datetime.datetime.now(tz).replace(second=0, microsecond=0)
+        # retornar como naive (consistência com parse_br_datetime que cria naive datetimes)
+        return datetime.datetime(now.year, now.month, now.day, now.hour, now.minute)
+    except Exception:
+        return datetime.datetime.now().replace(second=0, microsecond=0)
+
+
+def sp_now_str():
+    return sp_now_naive().strftime("%d/%m/%Y %H:%M")
+
+
 def calcular_status(registro):
     """
     Calcula o status do registro para exportação CSV.
@@ -85,7 +104,7 @@ def calcular_status(registro):
     if tipo == "emprestimo" and not devolvido:
         dt_raw = registro.get("data_retorno", "")
         dt = parse_br_datetime(dt_raw)
-        if dt and dt <= datetime.datetime.now():
+        if dt and dt <= sp_now_naive():
             return f"Atrasado ({dt.strftime('%d/%m/%Y')})"
     
     if estoque and tipo == "entrada":
@@ -98,9 +117,9 @@ def calcular_status(registro):
 
 
 def gerar_notificacoes_atraso_html(registros):
-    """(Deprecated) Mantido para compatibilidade — usar gerar_pendencias_html no frontend."""
+    """(Deprecated) Mantido para compatibilidade — usar gerar_pendencias_html no frontend.""" 
     atrasados = []
-    now_min = datetime.datetime.now().replace(second=0, microsecond=0)
+    now_min = sp_now_naive()
     for r in registros:
         if r.get("oculto", False) or r.get("estoque", False):
             continue
@@ -135,7 +154,7 @@ def gerar_pendencias_html(registros):
     - atrasos (emprestimos vencidos) no topo
     - entradas com motivo != 'outros' sem atualização a mais de 7 dias (sem saida com mesmo workflow OU sem observação atualizada)
     """
-    now = datetime.datetime.now().replace(second=0, microsecond=0)
+    now = sp_now_naive()
     atrasos = []
     pendencias = []
 
@@ -208,7 +227,9 @@ def gerar_pendencias_html(registros):
             obs_antiga = True
 
         # mostrará se não existe saida com mesmo workflow OU se a última observação é antiga/ausente
-        if (not tem_saida_com_wf) or obs_antiga:
+        # CORREÇÃO: deve mostrar somente se NÃO existe saída com o mesmo workflow E a observação for antiga/ausente.
+        # Ou seja: quando houver observação recente ou já existir saída com o workflow, não deve aparecer.
+        if (not tem_saida_com_wf) and obs_antiga:
             pendencias.append((r, delta_days))
 
     # gerar HTML do painel
@@ -541,6 +562,7 @@ def gerar_html_form(registros):
     <form method="POST" action="/registrar" id="mainForm" onsubmit="return validarFormulario()">
         <!-- campo oculto preenchido no cliente com o usuário da máquina (se possível) -->
         <input type="hidden" name="client_user" id="client_user" value="">
+        <input type="hidden" name="registrado_em" id="registrado_em_main" value="">
         <label>Tipo</label>
         <select name="tipo" id="tipo" onchange="toggleEmprestimoCampos()" required>
             <option value="" disabled selected>Selecione o tipo...</option>
@@ -665,6 +687,7 @@ def gerar_html_form(registros):
     </div>
     <form method="POST" action="/adicionar_observacao" id="form_add_obs" style="margin-top:10px;display:flex;gap:8px;flex-direction:column;">
       <input type="hidden" name="id" id="obs_record_id" value="">
+      <input type="hidden" name="registrado_em" id="registrado_em_obs" value="">
       <label style="font-size:13px;color:var(--muted);margin:0;">Adicionar observação</label>
       <textarea name="texto" id="obs_text" required style="min-height:60px;padding:8px;background:#121212;border:1px solid #222;color:#eaeaea;border-radius:6px"></textarea>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
@@ -720,6 +743,24 @@ def gerar_html_form(registros):
         } catch (e) {
             console.error('Erro ao setar data_inicio:', e);
         }
+        // preencher registrado_em com data do cliente antes de enviar formulários
+        try {
+            var mainForm = document.getElementById('mainForm');
+            if (mainForm) {
+                mainForm.addEventListener('submit', function(){
+                    try { document.getElementById('registrado_em_main').value = formatBRDate(new Date()); } catch(e){}
+                });
+            }
+        } catch(e){}
+
+        try {
+            var formObs = document.getElementById('form_add_obs');
+            if (formObs) {
+                formObs.addEventListener('submit', function(){
+                    try { document.getElementById('registrado_em_obs').value = formatBRDate(new Date()); } catch(e){}
+                });
+            }
+        } catch(e){}
 
         try {
             function detectClientUser() {
@@ -874,12 +915,87 @@ def gerar_pagina_lista(registros):
     for r in RESPONSAVEIS:
         responsaveis_html += '<option value="{}">{}</option>'.format(r, r)
 
-    # gera linhas da tabela
+    # --- calcular pendências/atrasos similar a gerar_pendencias_html ---
+    now = sp_now_naive()
+    workflow_map = {}
+    for r in registros:
+        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
+            # ainda adicionamos ao mapa para checagem de workflow, mesmo se oculto
+            wf = (r.get("workflow") or "").strip()
+            if wf:
+                workflow_map.setdefault(wf, []).append(r)
+        else:
+            wf = (r.get("workflow") or "").strip()
+            if wf:
+                workflow_map.setdefault(wf, []).append(r)
+
+    atrasos_ids = set()
+    for r in registros:
+        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
+            # pendências/atrasos normalmente não consideram ocultos/estoque/devolvidos,
+            # mas seguimos a lógica do painel (ignora ocultos/estoque/devolvido)
+            pass
+        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
+            continue
+        if r.get("tipo") == "emprestimo" and not r.get("devolvido", False):
+            dt_raw = r.get("data_retorno", "")
+            dt = parse_br_datetime(dt_raw)
+            if dt and dt <= now:
+                atrasos_ids.add(str(r.get("id", "")))
+
+    pendencias_ids = set()
+    for r in registros:
+        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
+            continue
+        if r.get("tipo") != "entrada":
+            continue
+        motivo = (r.get("motivo") or "").strip().lower()
+        if motivo == "outros" or motivo == "outro" or motivo == "other":
+            continue
+        data_inicio_raw = r.get("data_inicio", "")
+        dt_inicio = parse_br_datetime(data_inicio_raw)
+        if not dt_inicio:
+            continue
+        delta_days = (now - dt_inicio).days
+        if delta_days < 7:
+            continue
+
+        wf = (r.get("workflow") or "").strip()
+        tem_saida_com_wf = False
+        if wf:
+            others = workflow_map.get(wf, [])
+            for o in others:
+                if o is r:
+                    continue
+                if o.get("tipo") == "saida" and not o.get("oculto", False):
+                    tem_saida_com_wf = True
+                    break
+
+        # última observação registrada no próprio registro (se houver)
+        last_obs_date = None
+        try:
+            obs_list = r.get("observacoes", []) or []
+            for ob in obs_list:
+                reg_em = ob.get("registrado_em") or ob.get("registered_at") or ""
+                dt_obs = parse_br_datetime(reg_em)
+                if dt_obs:
+                    if (last_obs_date is None) or dt_obs > last_obs_date:
+                        last_obs_date = dt_obs
+        except Exception:
+            last_obs_date = None
+
+        obs_antiga = True
+        if last_obs_date:
+            obs_antiga = (now - last_obs_date).days >= 7
+        else:
+            obs_antiga = True
+
+        if (not tem_saida_com_wf) and obs_antiga:
+            pendencias_ids.add(str(r.get("id", "")))
+
+    # gera linhas da tabela (não removendo os ocultos; marcamos com data-atributos)
     linhas = ""
     for r in registros:
-        # não mostrar registros marcados como ocultos
-        if r.get("oculto", False):
-            continue
         id_ = r.get("id", "")
         tipo = r.get("tipo", "")
         responsavel = r.get("responsavel", "")
@@ -892,15 +1008,18 @@ def gerar_pagina_lista(registros):
         data_inicio = r.get("data_inicio", "")
         emprestado_para = r.get("emprestado_para", "")
         data_retorno = r.get("data_retorno", "")
-        devolvido = r.get("devolvido", False)
+        devolvido = bool(r.get("devolvido", False))
         observacao = r.get("observacao", "")
-        estoque = r.get("estoque", False)
+        estoque = bool(r.get("estoque", False))
+        oculto = bool(r.get("oculto", False))
 
-        # --- cálculo de atraso ---
+        id_str = str(id_)
+
+        # --- cálculo de atraso (mantém) ---
         atrasado = False
         atraso_html = ""
         try:
-            now_min = datetime.datetime.now().replace(second=0, microsecond=0)
+            now_min = sp_now_naive()
             if tipo == "emprestimo" and not devolvido:
                 dt_ret = parse_br_datetime(data_retorno)
                 if dt_ret and dt_ret <= now_min:
@@ -909,37 +1028,6 @@ def gerar_pagina_lista(registros):
         except Exception:
             atrasado = False
             atraso_html = ""
-
-        botao_devolver = ""
-        botao_extender = ""
-        botao_observacao = ""
-        # botão "Retornar máquina" aparece para todos os tipos enquanto não devolvido
-        if not devolvido:
-            # usamos /retornar para tratar comportamentos diferentes no servidor
-            botao_devolver = (
-                '<form method="POST" action="/retornar" style="display:inline-flex;align-items:center;margin:0;">'
-                 f'<input type="hidden" name="id" value="{id_}">'
-                 '<button type="submit" class="btn-action btn-devolver" title="Retornar máquina">'
-                 '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
-                 '<path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19l12-12-1.4-1.4z"/>'
-                 '</svg>'
-                 '</button>'
-                 '</form>'
-             )
-
-            # botão estender só para empréstimos (como antes)
-            if tipo == "emprestimo":
-                data_retorno_br = normalize_br_datetime_str(data_retorno) if data_retorno else ""
-                safe_data = data_retorno_br.replace("'", "\\'")
-                botao_extender = (
-                     f'<span style="display:inline-flex;align-items:center;">'
-                     f'<button class="btn-action btn-estender" title="Estender empréstimo" onclick="abrirExtensao({id_}, \'{safe_data}\')" type="button">'
-                      '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
-                      '<path fill="currentColor" d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .34-.03.67-.09.99L19 14.5c.06-.33.09-.67.09-1.01 0-4.42-3.58-8-8-8zM6.09 9.01C6.03 9.33 6 9.66 6 10c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6 0-.34.03-.67.09-.99L6.09 9.01z"/>'
-                      '</svg>'
-                      '</button>'
-                     '</span>'
-                  )
 
         # botão observação (sempre aparece). Passa lista de observações serializada para o JS.
         try:
@@ -958,8 +1046,33 @@ def gerar_pagina_lista(registros):
             '</span>'
         )
 
-        # botão estoque (apenas para entradas não devolvidas)
+        # botões padrões (devolver/extender/estoque/excluir) - simplificados; mantemos os existentes quando necessário
+        botao_devolver = ""
+        botao_extender = ""
         botao_estoque = ""
+        if not devolvido:
+            botao_devolver = (
+                '<form method="POST" action="/retornar" style="display:inline-flex;align-items:center;margin:0;">'
+                 f'<input type="hidden" name="id" value="{id_}">'
+                 '<button type="submit" class="btn-action btn-devolver" title="Retornar máquina">'
+                 '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                 '<path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19l12-12-1.4-1.4z"/>'
+                 '</svg>'
+                 '</button>'
+                 '</form>'
+             )
+            if tipo == "emprestimo":
+                data_retorno_br = normalize_br_datetime_str(data_retorno) if data_retorno else ""
+                safe_data = data_retorno_br.replace("'", "\\'")
+                botao_extender = (
+                     f'<span style="display:inline-flex;align-items:center;">'
+                     f'<button class="btn-action btn-estender" title="Estender empréstimo" onclick="abrirExtensao({id_}, \'{safe_data}\')" type="button">'
+                      '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                      '<path fill="currentColor" d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .34-.03.67-.09.99L19 14.5c.06-.33.09-.67.09-1.01 0-4.42-3.58-8-8-8zM6.09 9.01C6.03 9.33 6 9.66 6 10c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6 0-.34.03-.67.09-.99L6.09 9.01z"/>'
+                      '</svg>'
+                      '</button>'
+                     '</span>'
+                  )
         if tipo == "entrada" and not devolvido:
             estoque_status = "Remover do estoque" if estoque else "Colocar em estoque"
             botao_estoque = (
@@ -985,22 +1098,32 @@ def gerar_pagina_lista(registros):
             '</form>'
         )
 
-        # prioridade: Devolvido > Atrasado > Em estoque > Ativo
-        if devolvido:
-            # se há status_extra, mostrar ele (ex.: "devolvido (N)")
-            if r.get("status_extra"):
-                status = r.get("status_extra")
-            else:
-                status = "Devolvido"
-        elif atrasado:
-            status = atraso_html
-        elif estoque and tipo == "entrada":
-            status = "Em estoque"
+        # prioridade: Excluído (oculto) > Devolvido > Atrasado > Em estoque > Ativo
+        if oculto:
+            status = "<span style='color:#ff5050;font-weight:700;'>Excluído</span>"
         else:
-            status = "Ativo" if tipo == "emprestimo" else ""
+            if devolvido:
+                if r.get("status_extra"):
+                    status = r.get("status_extra")
+                else:
+                    status = "Devolvido"
+            elif atrasado:
+                status = atraso_html
+            elif estoque and tipo == "entrada":
+                status = "Em estoque"
+            else:
+                status = "Ativo" if tipo == "emprestimo" else ""
 
+        # marcar pendencia/atraso
+        is_pendencia = id_str in pendencias_ids or id_str in atrasos_ids
+        is_atraso = id_str in atrasos_ids
+
+        # adicionar data-atributos para filtragem client-side e classe para ocultos
+        tr_class = "oculto-row" if oculto else ""
         linhas += (
-            f'<tr data-id="{id_}">'
+            f'<tr class="{tr_class}" data-id="{id_}" data-devolvido="{str(devolvido).lower()}" '
+            f'data-estoque="{str(estoque).lower()}" data-oculto="{str(oculto).lower()}" '
+            f'data-pendencia="{str(is_pendencia).lower()}" data-atraso="{str(is_atraso).lower()}">'
             f'<td>{id_}</td>'
             f'<td>{tipo}</td>'
             f'<td>{responsavel}</td>'
@@ -1018,6 +1141,7 @@ def gerar_pagina_lista(registros):
             '</tr>'
         )
 
+    # inserir o select de visão entre a pesquisa e o botão de ordem e JS para controlar as views
     page = """
 <!doctype html>
 <html lang="pt-BR">
@@ -1048,6 +1172,21 @@ def gerar_pagina_lista(registros):
     tr:nth-child(even) td { background:#0b0b0b; }
     .small { font-size:12px; color:var(--muted); }
     form.inline { display:inline; }
+
+    /* estilo específico para o seletor de visão */
+    #view_selector {
+        padding:8px 10px;
+        border-radius:8px;
+        border:1px solid var(--border);
+        background:#121212;
+        color:#eee;
+        font-size:14px;
+        -webkit-appearance: none;
+        appearance: none;
+    }
+
+    /* linhas ocultas (excluídas) aparecem em vermelho */
+    tr.oculto-row td { color: #ff6b6b; }
 
     .btn-action {
          display:inline-flex;
@@ -1191,6 +1330,15 @@ def gerar_pagina_lista(registros):
         </div>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <input id="search" class="search" placeholder="Pesquisar (responsável, patrimônio, hardware, modelo...)">
+            <!-- Seletor de visão adicionado aqui -->
+            <select id="view_selector" title="Selecionar vista">
+                <option value="ativos" selected>Listar: Ativos</option>
+                <option value="inativos">Listar: Inativos</option>
+                <option value="estoque">Listar: Estoque</option>
+                <option value="pendentes">Listar: Pendentes</option>
+                <option value="legado">Lista: Legado</option>
+                <option value="tudo">Listar: Tudo</option>
+            </select>
             <button id="btnToggleOrder" class="btn ghost" type="button" title="Alternar ordem por ID">Ordem: Mais novo → antigo</button>
             <!-- Agora abre modal com filtros -->
             <button id="btnExportCsv" class="btn" type="button">Exportar CSV</button>
@@ -1362,6 +1510,7 @@ def gerar_pagina_lista(registros):
     </div>
     <form method="POST" action="/adicionar_observacao" id="form_add_obs" style="margin-top:10px;display:flex;gap:8px;flex-direction:column;">
       <input type="hidden" name="id" id="obs_record_id" value="">
+      <input type="hidden" name="registrado_em" id="registrado_em_obs" value="">
       <label style="font-size:13px;color:var(--muted);margin:0;">Adicionar observação</label>
       <textarea name="texto" id="obs_text" required style="min-height:60px;padding:8px;background:#121212;border:1px solid #222;color:#eaeaea;border-radius:6px"></textarea>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
@@ -1375,57 +1524,250 @@ def gerar_pagina_lista(registros):
 <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 <script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/pt.js"></script>
 <script>
-function abrirExtensao(id, current_date_br){
-    try{ document.getElementById('extender_id').value = id; }catch(e){}
-    try{ document.getElementById('extender_data').value = current_date_br || ''; }catch(e){}
-    try{ document.getElementById('modal_extender').style.display = 'flex'; }catch(e){}
-}
-function fecharExtensao(){ try{ document.getElementById('modal_extender').style.display = 'none'; }catch(e){} }
+    // Atualização automática do painel de pendências (a cada 20s)
+    const ATUALIZA_INTERVAL_MS = 20000;
+    async function atualizarAtrasos() {
+        try {
+            const res = await fetch('/atrasos');
+            if (!res.ok) return;
+            const html = await res.text();
+            const el = document.getElementById('mini_pendencias');
+            if (el) el.innerHTML = html;
+        } catch (e) {
+            console.error('Erro atualizando pendências:', e);
+        }
+    }
+    setInterval(atualizarAtrasos, ATUALIZA_INTERVAL_MS);
 
-function abrirObs(id, obs_json){
-    try{
-        var list = [];
-        if (typeof obs_json === 'string') {
-            try { list = JSON.parse(obs_json); } catch(e){ list = []; }
-        } else if (Array.isArray(obs_json)) {
-            list = obs_json;
-        } else if (obs_json && typeof obs_json === 'object') {
-            if (Array.isArray(obs_json)) list = obs_json;
-            else list = [];
+    function initFlatpickrBR(selector) {
+        flatpickr(selector, {
+            enableTime: true,
+            time_24hr: true,
+            dateFormat: "d/m/Y H:i",
+            locale: "pt",
+            theme: "light",  // Força tema claro
+            // Desabilita a detecção automática de tema escuro
+            onReady: function(selectedDates, dateStr, instance) {
+                // Remove qualquer classe de tema escuro que possa ter sido adicionada
+                instance.calendarContainer.classList.remove("flatpickr-dark");
+                instance.calendarContainer.classList.add("flatpickr-light");
+            }
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        try {
+            function pad(n){ return n.toString().padStart(2, '0'); }
+            function formatBRDate(d){
+                return pad(d.getDate()) + '/' + pad(d.getMonth()+1) + '/' + d.getFullYear()
+                    + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+            }
+            document.getElementById("data_inicio").value = formatBRDate(new Date());
+        } catch (e) {
+            console.error('Erro ao setar data_inicio:', e);
         }
-        var tbody = document.querySelector('#obs_table tbody');
-        tbody.innerHTML = '';
-        if (!list || list.length === 0){
-            var tr = document.createElement('tr');
-            tr.innerHTML = '<td style="padding:6px;border-bottom:1px solid #222;color:var(--muted);" colspan="2">Nenhuma observação registrada.</td>';
-            tbody.appendChild(tr);
+        // preencher registrado_em com data do cliente antes de enviar formulários
+        try {
+            var mainForm = document.getElementById('mainForm');
+            if (mainForm) {
+                mainForm.addEventListener('submit', function(){
+                    try { document.getElementById('registrado_em_main').value = formatBRDate(new Date()); } catch(e){}
+                });
+            }
+        } catch(e){}
+
+        try {
+            var formObs = document.getElementById('form_add_obs');
+            if (formObs) {
+                formObs.addEventListener('submit', function(){
+                    try { document.getElementById('registrado_em_obs').value = formatBRDate(new Date()); } catch(e){}
+                });
+            }
+        } catch(e){}
+
+        try {
+            function detectClientUser() {
+                try {
+                    if (window.ActiveXObject || "ActiveXObject" in window) {
+                        var net = new ActiveXObject("WScript.Network");
+                        return net.UserName || "";
+                    }
+                } catch(e) {}
+                return "";
+            }
+            var cu = detectClientUser();
+            var el = document.getElementById("client_user");
+            if (el) el.value = cu;
+        } catch(e) { console.warn("detecção usuário cliente falhou:", e); }
+
+        initFlatpickrBR("#data_inicio");
+        initFlatpickrBR("#data_retorno");
+        initFlatpickrBR("#extender_data");
+
+        atualizarAtrasos();
+
+        try {
+            toggleOutroMotivo();
+            toggleOutroHardware();
+            toggleEmprestimoCampos();
+        } catch (e) {}
+    });
+
+    function toggleOutroMotivo() {
+        const show = document.getElementById("motivo_select").value === "outros";
+        document.getElementById("motivo_outros_div").style.display = show ? "block" : "none";
+        if (show) document.getElementById("motivo_outros").required = true;
+        else document.getElementById("motivo_outros").required = false;
+    }
+
+    function toggleOutroHardware() {
+        const show = document.getElementById("hardware_select").value === "outros";
+        document.getElementById("hardware_outros_div").style.display = show ? "block" : "none";
+        if (show) document.getElementById("hardware_outros").required = true;
+        else document.getElementById("hardware_outros").required = false;
+    }
+
+    function toggleEmprestimoCampos() {
+        const tipo = document.getElementById("tipo").value;
+        const area = document.getElementById("area_emprestimo");
+        if (tipo === "emprestimo") {
+            area.style.display = "block";
+            document.getElementById("emprestado_para").required = true;
+            document.getElementById("data_retorno").required = true;
         } else {
-            list.forEach(function(o){
-                var date = o.registrado_em || '';
-                var text = o.text || '';
-                var tr = document.createElement('tr');
-                tr.innerHTML = "<td style='padding:6px;border-bottom:1px solid #222;vertical-align:top;white-space:nowrap;color:var(--muted);'>"+ date +"</td>" +
-                               "<td style='padding:6px;border-bottom:1px solid #222;white-space:pre-wrap;'>"+ (text || '') +"</td>";
-                tbody.appendChild(tr);
-            });
+            area.style.display = "none";
+            document.getElementById("emprestado_para").required = false;
+            document.getElementById("data_retorno").required = false;
         }
-        try{ document.getElementById('obs_record_id').value = id; }catch(e){}
-        try{ document.getElementById('obs_text').value = ''; }catch(e){}
-        document.getElementById('modal_obs').style.display = 'flex';
-    }catch(e){ console.error('abrirObs erro', e); }
-}
-function fecharObs(){ try{ document.getElementById('modal_obs').style.display = 'none'; }catch(e){} }
+    }
+
+    function validarFormulario() {
+        const patr = document.getElementById("patrimonio").value.trim();
+        const hardware = document.getElementById("hardware_select").value;
+        
+        // Se não for Teclado/Mouse e o patrimônio foi preenchido, valida
+        if (hardware !== "Teclado/Mouse" && patr !== "") {
+            if (!/^[0-9]{7,}$/.test(patr)) {
+                alert("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos.");
+                return false;
+            }
+        }
+        // Se for Teclado/Mouse, o patrimônio é opcional, mas se preenchido deve ser válido
+        else if (hardware === "Teclado/Mouse" && patr !== "") {
+            if (!/^[0-9]{7,}$/.test(patr)) {
+                alert("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos, ou deixe em branco para Teclado/Mouse.");
+                return false;
+            }
+        }
+
+        const workflow = document.getElementById("workflow").value.trim();
+        if (workflow) {
+            if (!/^(?:P-\\d{7}|P-\\d{5}-\\d{2})$/i.test(workflow)) {
+                alert("Workflow inválido. Formatos aceitos: P-1234567 ou P-12345-00.");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    function limparFormulario() {
+        document.getElementById("mainForm").reset();
+        try {
+            document.querySelectorAll('.flatpickr-input').forEach(i => i.value = "");
+        } catch (e) {}
+    }
+
+    function abrirExtensao(id, current_date_br = "") {
+        document.getElementById("extender_id").value = id;
+        document.getElementById("extender_data").value = current_date_br || "";
+        document.getElementById("modal_extender").style.display = "flex";
+    }
+    function fecharExtensao() {
+        document.getElementById("modal_extender").style.display = "none";
+    }
+
+    function abrirObs(id, obs_json){
+        try{
+            var list = [];
+            if (typeof obs_json === 'string') {
+                try { list = JSON.parse(obs_json); } catch (e) { list = []; }
+            } else if (Array.isArray(obs_json)) {
+                list = obs_json;
+            } else if (obs_json && typeof obs_json === 'object') {
+                if (Array.isArray(obs_json)) list = obs_json;
+                else list = [];
+            }
+            var tbody = document.querySelector('#obs_table tbody');
+            tbody.innerHTML = '';
+            if (!list || list.length === 0){
+                var tr = document.createElement('tr');
+                tr.innerHTML = '<td style="padding:6px;border-bottom:1px solid #222;color:var(--muted);" colspan="2">Nenhuma observação registrada.</td>';
+                tbody.appendChild(tr);
+            } else {
+                list.forEach(function(o){
+                    var date = o.registrado_em || '';
+                    var text = o.text || '';
+                    var tr = document.createElement('tr');
+                    tr.innerHTML = "<td style='padding:6px;border-bottom:1px solid #222;vertical-align:top;white-space:nowrap;color:var(--muted);'>"+ date +"</td>" +
+                                   "<td style='padding:6px;border-bottom:1px solid #222;white-space:pre-wrap;'>"+ (text || '') +"</td>";
+                    tbody.appendChild(tr);
+                });
+            }
+            try{ document.getElementById('obs_record_id').value = id; }catch(e){}
+            try{ document.getElementById('obs_text').value = ''; }catch(e){}
+            document.getElementById('modal_obs').style.display = 'flex';
+        }catch(e){ console.error('abrirObs erro', e); }
+    }
+    function fecharObs(){ try{ document.getElementById('modal_obs').style.display = 'none'; }catch(e){} }
+
+    document.addEventListener("DOMContentLoaded", function() {
+    });
 </script>
 
 <script>
     // filtro cliente + ordenação por ID (mais novo <-> mais antigo)
-    document.getElementById("search").addEventListener("input", function() {
-        const q = this.value.toLowerCase();
+    function updateVisibility() {
+        const q = document.getElementById("search").value.toLowerCase();
+        const view = document.getElementById("view_selector").value;
         const rows = document.querySelectorAll("#tabela tbody tr");
         rows.forEach(r => {
+            // base: cada row decide se cumpre a view
+            const devolvido = r.getAttribute('data-devolvido') === 'true';
+            const estoque = r.getAttribute('data-estoque') === 'true';
+            const oculto = r.getAttribute('data-oculto') === 'true';
+            const pendencia = r.getAttribute('data-pendencia') === 'true';
+
+            let view_ok = false;
+            if (view === 'ativos') {
+                view_ok = (devolvido === false) && (oculto === false);
+            } else if (view === 'inativos') {
+                view_ok = (devolvido === true) || (estoque === true);
+            } else if (view === 'estoque') {
+                view_ok = (estoque === true);
+            } else if (view === 'pendentes') {
+                view_ok = (pendencia === true);
+            } else if (view === 'legado') {
+                view_ok = (oculto === false);
+            } else if (view === 'tudo') {
+                view_ok = true;
+            }
+
+            // search filter: se a string não aparece no texto da linha, esconder
             const text = r.innerText.toLowerCase();
-            r.style.display = text.includes(q) ? "" : "none";
+            const search_ok = q === "" || text.includes(q);
+
+            r.style.display = (view_ok && search_ok) ? "" : "none";
         });
+    }
+
+    document.getElementById("search").addEventListener("input", updateVisibility);
+    document.getElementById("view_selector").addEventListener("change", updateVisibility);
+    document.addEventListener("DOMContentLoaded", function () {
+        const seletor = document.getElementById("view_selector");
+        if (seletor) {
+            seletor.dispatchEvent(new Event("change"));
+        }
     });
 
     (function(){
@@ -1665,7 +2007,7 @@ class Servidor(BaseHTTPRequestHandler):
                       "status", "client_ip", "registrado_em"]
 
             from io import StringIO
-            csv_buffer = StringIO()
+            csv_buffer = StringIO();
             writer = csv.DictWriter(csv_buffer, fieldnames=campos)
             writer.writeheader()
             for r in filtered:
@@ -1680,8 +2022,8 @@ class Servidor(BaseHTTPRequestHandler):
                 row["status"] = calcular_status(r)
                 writer.writerow(row)
 
-            csv_data = csv_buffer.getvalue()
-            csv_buffer.close()
+            csv_data = csv_buffer.getvalue();
+            csv_buffer.close();
 
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
@@ -1784,7 +2126,8 @@ class Servidor(BaseHTTPRequestHandler):
                 "observacao": observacao,
                 "observacoes": ([{
                     "text": observacao,
-                    "registrado_em": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                    "registrado_em": (normalize_br_datetime_str(campos.get("registrado_em", [""])[0]) 
+                                      or sp_now_str())
                 }] if observacao else [])
              }
 
@@ -1799,7 +2142,7 @@ class Servidor(BaseHTTPRequestHandler):
             if client_ip:
                 novo["oculto_meta"] = {
                     "client_ip": client_ip,
-                    "registrado_em": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                    "registrado_em": sp_now_str()
                 }
 
             registros.append(novo)
@@ -1849,7 +2192,7 @@ class Servidor(BaseHTTPRequestHandler):
                 return
 
             # para entrada => criar SAÍDA; para saída => criar ENTRADA
-            now_str = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+            now_str = sp_now_str()
             # gerar novo id
             maxid = 0
             for r in registros:
@@ -1887,7 +2230,7 @@ class Servidor(BaseHTTPRequestHandler):
             # anexa meta oculta ao novo (client_ip/reg)
             novo["oculto_meta"] = {
                 "client_ip": original.get("oculto_meta", {}).get("client_ip", ""),
-                "registrado_em": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                "registrado_em": sp_now_str()
             }
 
             # atualiza registro original: marca devolvido True, remove estoque e adiciona status_extra com novo id
@@ -1896,13 +2239,12 @@ class Servidor(BaseHTTPRequestHandler):
                 try:
                     if int(r.get("id", 0)) == id_reg:
                         r["devolvido"] = True
-                        r["estoque"] = False  # Remove do estoque
+                        r["estoque"] = False  # Removes from stock
                         r["status_extra"] = f"Devolvido (ID: {novo_id})"
                         updated = True
                         break
                 except:
                     pass
-
             # adiciona novo registro
             registros.append(novo)
 
@@ -1928,7 +2270,6 @@ class Servidor(BaseHTTPRequestHandler):
                         updated = True
                 except:
                     pass
-
             if updated:
                 with open(ARQUIVO, "w", encoding="utf-8") as f:
                     json.dump(registros, f, ensure_ascii=False, indent=4)
@@ -1948,7 +2289,6 @@ class Servidor(BaseHTTPRequestHandler):
                         updated = True
                 except:
                     pass
-
             if updated:
                 with open(ARQUIVO, "w", encoding="utf-8") as f:
                     json.dump(registros, f, ensure_ascii=False, indent=4)
@@ -1968,7 +2308,6 @@ class Servidor(BaseHTTPRequestHandler):
                         updated = True
                 except:
                     pass
-
             if updated:
                 with open(ARQUIVO, "w", encoding="utf-8") as f:
                     json.dump(registros, f, ensure_ascii=False, indent=4)
@@ -1991,7 +2330,6 @@ class Servidor(BaseHTTPRequestHandler):
                         updated = True
                 except:
                     pass
-
             if updated:
                 with open(ARQUIVO, "w", encoding="utf-8") as f:
                     json.dump(registros, f, ensure_ascii=False, indent=4)
@@ -2004,13 +2342,16 @@ class Servidor(BaseHTTPRequestHandler):
             except:
                 id_reg = 0
             texto = campos.get("texto", [""])[0].strip()
-
+            # preferir data enviada pelo cliente (registrado_em); fallback para server time
+            reg_raw = campos.get("registrado_em", [""])[0].strip()
+            reg_norm = normalize_br_datetime_str(reg_raw) or sp_now_str()
+#
             if not texto:
                 return self.responder_error("Observação vazia.")
-
+#
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
-
+#
             updated = False
             for r in registros:
                 try:
@@ -2019,14 +2360,13 @@ class Servidor(BaseHTTPRequestHandler):
                             r["observacoes"] = []
                         novo = {
                             "text": texto,
-                            "registrado_em": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                            "registrado_em": reg_norm
                         }
                         r["observacoes"].append(novo)
                         r["observacao"] = texto
                         updated = True
                 except:
                     pass
-
             if updated:
                 with open(ARQUIVO, "w", encoding="utf-8") as f:
                     json.dump(registros, f, ensure_ascii=False, indent=4)
