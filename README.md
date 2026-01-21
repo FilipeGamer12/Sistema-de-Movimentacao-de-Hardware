@@ -1,100 +1,82 @@
-# Controle de Hardware -- Servidor Python (HTTP)
+# Controle de Hardware — Servidor Python (HTTP)
 
-Este projeto implementa um **sistema completo de registro e controle de
-movimentações de hardware**, incluindo entradas, saídas e empréstimos,
-utilizando apenas **Python nativo** (`http.server`).\
-Ele fornece uma interface web moderna e responsiva, grava dados em JSON
-e suporta operações de empréstimo com notificação automática de atrasos.\
-(Sistema criado para uso interno do DEPPEN)
+Este repositório contém um **sistema leve de registro e controle de movimentações de hardware** (entradas, saídas e empréstimos) implementado com **Python nativo** usando `http.server`. A interface web é gerada dinamicamente pelo servidor e os dados são guardados em `dados.json`.
 
-------------------------------------------------------------------------
+---
 
-## 🚀 **Recursos Principais**
+## 🚀 Recursos principais (atualizado)
 
--   Interface web em HTML/CSS/JS embutida no próprio servidor.
--   Registro de:
-    -   **Entradas**
-    -   **Saídas**
-    -   **Empréstimos**
--   Controle de empréstimos com:
-    -   Notificação automática de **atrasos**
-    -   Botão para **devolver**
-    -   Botão para **estender devolução**
--   Pesquisa e ordenação no frontend.
--   Exportação completa para **CSV**.
--   Armazenamento simples em `dados.json`.
--   Sistema de "exclusão" não destrutiva (registros são apenas
-    ocultados).
--   Coleta de metadados invisíveis:
-    -   IP do cliente
-    -   Data/hora do registro
--   Servidor multithread via `ThreadingHTTPServer`.
+- Interface web embutida (HTML/CSS/JS) servida por `sistema.py`.
+- Registro de movimentos: **Entrada**, **Saída** e **Empréstimo**.
+- Controle de empréstimos com:
+  - Notificação automática de **atrasos** (com endpoint dedicado).
+  - Botão **"Retornar máquina"** (anteriormente "Marcar como devolvido") disponível para todos os registros não devolvidos.
+  - Possibilidade de **estender** data prevista de devolução para registros do tipo `emprestimo`.
+- **Painel de Pendências** separado da área de registro (card à parte). O painel mostra: atrasos (emprestimos vencidos) e entradas sem atualização há 7 dias ou mais.
+  - Pendências são calculadas pela **data do registro (`data_inicio`) e/ou pela data da última observação** — o que for mais recente. Se a última observação for recente (menos de 7 dias) ou já existir uma saída com o mesmo workflow, a pendência não é exibida.
+  - Quando não há pendências, o painel exibe uma mensagem clara: **"Sem pendências."**
+- Modal de **Observações** por registro: permite ver histórico de observações e **adicionar observações** (rota `/adicionar_observacao`).
+  - Ao adicionar uma observação recente a uma entrada, a pendência correspondente deixa de aparecer (lógica implementada no servidor).
+- **Exportação CSV** com filtros avançados (modal de filtros): permite filtrar por tipo, responsável, workflow, período (`date_from` / `date_to`) e outros campos — agora com seletores de data (flatpickr) no modal para facilitar escolha de datas.
+- Painel de pendências atualiza via AJAX a cada 20s (endpoint `/atrasos`).
+- Armazenamento simples em `dados.json` (formato JSON legível).
+- Operação multithreaded via `ThreadingHTTPServer`.
 
-------------------------------------------------------------------------
+---
 
-## 🗂 **Estrutura do Projeto**
+## 🗂 Estrutura principal do projeto
 
-    .
-    ├── sistema_.py        # Servidor HTTP com backend + frontend embutido
-    └── dados.json        # Banco de dados simples (gerado automaticamente)
+```
+.
+├── sistema.py        # Servidor HTTP (backend + frontend embutidos)
+└── dados.json        # Banco de dados simples (gerado automaticamente)
+```
 
-------------------------------------------------------------------------
+---
 
-## 📦 **Instalação**
+## 📦 Instalação e execução
 
 Requisitos:
 
--   Python 3.8 ou superior
--   Nenhuma lib externa é necessária
+- Python 3.8 ou superior
+- Sem dependências externas (o frontend usa CDNs para flatpickr)
 
-Clone o repositório e execute:
+Executar:
 
-``` bash
-python3 sistema_.py
+```bash
+python3 sistema.py
 ```
 
-O servidor iniciará em:
+Por padrão o servidor serve em `http://localhost:8000`.
 
-    http://localhost:8000
+> Para executar como serviço (systemd) veja o exemplo de unit (atualize caminhos para o seu sistema).
 
-------------------------------------------------------------------------
+---
 
-## 🖥 **Funcionalidades do Sistema**
+## 🔗 Endpoints (principais)
 
-### 📌 **Página principal (/)**
+| Método | Rota                  | Descrição |
+|--------|-----------------------|-----------|
+| GET    | `/`                   | Formulário principal (Registrar Movimentação) |
+| GET    | `/lista`              | Página com tabela de registros e exportação CSV |
+| GET    | `/export_csv`         | Gera/baixa CSV aplicando filtros informados |
+| GET    | `/atrasos`            | HTML do mini painel de pendências (usado por AJAX) |
+| POST   | `/registrar`          | Salvar novo registro (entrada/saída/emprestimo) |
+| POST   | `/retornar`           | Marcar registro como retornado / "Retornar máquina" |
+| POST   | `/estender`           | Atualizar `data_retorno` (estender empréstimo) |
+| POST   | `/ocultar`            | Ocultar ("excluir" não destrutivo) um registro |
+| POST   | `/alternar_estoque`   | Alternar flag de estoque para entradas |
+| POST   | `/adicionar_observacao` | Adicionar observação a um registro |
 
-Contém o formulário para registrar movimentações.\
-Campos variam conforme o tipo selecionado (entrada, saída ou
-empréstimo).
+(As rotas e nomes refletem a versão atual do `sistema.py`.)
 
-### 📌 **Lista de registros (/lista)**
+---
 
-Inclui:
+## 🧩 Formato do JSON (`dados.json`) — campos relevantes
 
--   Tabela completa com filtros
--   Indicação de atrasados
--   Ordenação dinâmica por ID
--   Botões:
-    -   **Devolver**
-    -   **Estender**
-    -   **Excluir (ocultar)**
+Cada registro é um objeto com campos como:
 
-### 📌 **Exportação CSV (/export_csv)**
-
-Baixa um arquivo CSV contendo todos os registros (inclusive campos
-ocultos de metadados).
-
-### 📌 **Notificações de atraso (/atrasos)**
-
-Endpoint usado via AJAX para atualizar alertas de empréstimos vencidos.
-
-------------------------------------------------------------------------
-
-## 🧩 **Formato do JSON (dados.json)**
-
-Cada registro contém informações como:
-
-``` json
+```json
 {
   "id": 1,
   "tipo": "emprestimo",
@@ -110,81 +92,50 @@ Cada registro contém informações como:
   "emprestado_para": "Usuário X",
   "devolvido": false,
   "oculto": false,
-  "oculto_meta": {
-    "client_ip": "192.168.0.10",
-    "registrado_em": "28/11/2025 14:31"
-  }
+  "estoque": false,
+  "observacoes": [
+     { "registrado_em": "28/11/2025 15:00", "text": "Observação X" }
+  ],
+  "oculto_meta": { "client_ip": "192.168.0.10", "registrado_em": "28/11/2025 14:31" }
 }
 ```
 
-------------------------------------------------------------------------
+Observações:
+- O campo `observacoes` é _lista_ de objetos com `registrado_em` e `text` (ou `texto`).
+- Metadados do registro (IP, timestamp) ficam em `oculto_meta` (usado na exportação CSV).
+- O CSV exportado inclui colunas como `id, tipo, responsavel, patrimonio, workflow, motivo, hardware, marca, modelo, data_inicio, data_retorno, devolvido, estoque, status, client_ip, registrado_em` — o campo `status` é calculado pelo servidor (ex.: "Devolvido", "Atrasado (DD/MM/YYYY)", "Em estoque", "Ativo").
 
-## 🔧 **Endpoints Disponíveis**
+---
 
-  Método   Rota            Descrição
-  -------- --------------- ----------------------------------
-  GET      `/`             Formulário principal\
-  GET      `/lista`        Tabela de registros\
-  GET      `/export_csv`   Geração de CSV\
-  GET      `/atrasos`      HTML de notificações de atraso\
-  POST     `/registrar`    Salvar novo registro\
-  POST     `/devolver`     Marcar empréstimo como devolvido\
-  POST     `/estender`     Alterar data de devolução\
-  POST     `/ocultar`      Ocultar registro
+## 🖥️ Frontend / UX — pontos importantes
 
-------------------------------------------------------------------------
+- Flatpickr (CDN) é usado para seleção de datas em todo o app (formulário principal, modal de exportação, modal de estender data).
+- O painel de pendências foi movido para um card separado ao lado do formulário na vista principal (desktop) e empilha acima em telas pequenas.
+- Modal de exportação foi reorganizado em uma grade (checkboxes à esquerda / controles à direita) e possui seletores de data com flatpickr para `date_from` / `date_to`.
+- Ao abrir o modal de exportação, o campo `date_to` é pré-definido com a hora atual do cliente.
+- O botão para retornar um registro foi renomeado para **"Retornar máquina"** e é exibido para todos os registros que não estão marcados como devolvidos.
 
-## 🏗 **Arquitetura Interna**
+---
 
-O sistema não utiliza frameworks --- todo o backend é implementado com:
+## 🔍 Regras de negócio relevantes (resumido)
 
--   `BaseHTTPRequestHandler`
--   `ThreadingHTTPServer`
--   `json`
--   `csv`
--   `datetime`
+- Pendência de entrada: um registro do tipo `entrada` (com `motivo` diferente de "outros") é considerado pendente se:
+  - Está a **7 dias ou mais** desde `data_inicio` **e**
+  - **Não** existe uma saída com o mesmo `workflow` **e**
+  - A última observação (se existir) está há 7 dias ou mais. Caso haja uma observação mais recente, a pendência não aparece.
+- Empréstimos: consideram `data_retorno`; se `data_retorno` <= agora e `devolvido` == false, aparece como **Atrasado**.
 
-Front-end utiliza:
+---
 
--   Flatpickr para escolha de datas
--   HTML gerado dinamicamente no próprio Python
--   CSS customizado em modo dark
+## 💡 Dicas de operação
 
-------------------------------------------------------------------------
+- Para editar a lista de responsáveis, edite a constante `RESPONSAVEIS` no topo de `sistema.py`.
+- Para customizar porta/host, edite a rotina que inicia o servidor (arquivo `sistema.py`).
+- Para rodar como serviço, adapte o exemplo de unit systemd informando o caminho correto para `sistema.py`.
 
-## 🛡 **Validações Importantes**
+---
 
--   Patrimônio com mínimo de 7 dígitos
--   Workflow nos formatos:
-    -   `P-1234567`
-    -   `P-12345-00`
--   Campos adicionais obrigatórios caso "outros" seja selecionado
--   Verificação de atraso baseada na data/hora do servidor
-
-------------------------------------------------------------------------
-
-## 🔄 **Executar como Serviço (Linux)**
-
-Exemplo de unit (systemd):
-
-``` ini
-[Unit]
-Description=Sistema de Controle de Hardware
-After=network.target
-
-[Service]
-WorkingDirectory=/caminho/para/pasta
-ExecStart=/usr/bin/python3 /caminho/para/sistema_.py
-Restart=always
-RestartSec=3
-User=root
-
-[Install]
-WantedBy=multi-user.target
-```
-
-------------------------------------------------------------------------
-
-## 📝 **Licença**
+## 📝 Licença
 
 Este projeto pode ser usado, modificado e distribuído livremente.
+
