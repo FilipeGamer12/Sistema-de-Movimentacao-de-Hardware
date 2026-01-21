@@ -4,9 +4,9 @@ Este repositório contém um **sistema leve de registro e controle de movimenta�
 
 ---
 
-## 🚀 Recursos principais (atualizado)
+## 🚀 Recursos principais
 
-- Interface web embutida (HTML/CSS/JS) servida por `sistema.py`.
+- Interface web embutida (HTML/CSS/JS) servida por `sistema_.py`.
 - Registro de movimentos: **Entrada**, **Saída** e **Empréstimo**.
 - Controle de empréstimos com:
   - Notificação automática de **atrasos** (com endpoint dedicado).
@@ -28,7 +28,7 @@ Este repositório contém um **sistema leve de registro e controle de movimenta�
 
 ```
 .
-├── sistema.py        # Servidor HTTP (backend + frontend embutidos)
+├── sistema_.py        # Servidor HTTP (backend + frontend embutidos)
 └── dados.json        # Banco de dados simples (gerado automaticamente)
 ```
 
@@ -44,7 +44,7 @@ Requisitos:
 Executar:
 
 ```bash
-python3 sistema.py
+python3 sistema_.py
 ```
 
 Por padrão o servidor serve em `http://localhost:8000`.
@@ -68,7 +68,7 @@ Por padrão o servidor serve em `http://localhost:8000`.
 | POST   | `/alternar_estoque`   | Alternar flag de estoque para entradas |
 | POST   | `/adicionar_observacao` | Adicionar observação a um registro |
 
-(As rotas e nomes refletem a versão atual do `sistema.py`.)
+(As rotas e nomes refletem a versão atual do `sistema_.py`.)
 
 ---
 
@@ -129,9 +129,9 @@ Observações:
 
 ## 💡 Dicas de operação
 
-- Para editar a lista de responsáveis, edite a constante `RESPONSAVEIS` no topo de `sistema.py`.
-- Para customizar porta/host, edite a rotina que inicia o servidor (arquivo `sistema.py`).
-- Para rodar como serviço, adapte o exemplo de unit systemd informando o caminho correto para `sistema.py`.
+- Para editar a lista de responsáveis, edite a constante `RESPONSAVEIS` no topo de `sistema_.py`.
+- Para customizar porta/host, edite a rotina que inicia o servidor (arquivo `sistema_.py`).
+- Para rodar como serviço, adapte o exemplo de unit systemd informando o caminho correto para `sistema_.py`.
 
 ---
 
