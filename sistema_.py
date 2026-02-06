@@ -376,6 +376,10 @@ def gerar_html_form(registros):
     .two-columns { display:flex; gap:12px; }
     .two-columns > * { flex:1; }
 
+    .four-columns { display:flex; gap:10px; align-items:flex-start; }
+    .four-columns > * { flex:1; }
+    .four-columns > .col-data { flex:1; }
+
     .row-right { display:flex; justify-content:flex-end; gap:10px; margin-top:14px; }
 
     button.primary {
@@ -529,6 +533,7 @@ def gerar_html_form(registros):
         .dashboard { flex-direction:column; align-items:stretch; padding:0 12px; }
         .left-card { order: -1; width:100%; max-width:100%; margin-bottom:12px; }
         .dashboard .card { width:100%; max-width:100%; }
+        .four-columns { flex-direction:column; }
     }
 
 </style>
@@ -577,27 +582,27 @@ def gerar_html_form(registros):
 """ + responsaveis_html + """
         </select>
 
-        <div class="two-columns">
+        <div class="four-columns">
             <div>
-                <div class="two-columns">
-                    <div>
-                        <label>Patrimônio (7 dígitos)</label>
-                        <!-- REMOVIDO: required -->
-                        <input type="text" name="patrimonio" id="patrimonio" pattern="\\d{7,}" inputmode="numeric" placeholder="Ex.: 1234567"
-                               title="Digite apenas números. Mínimo 7 dígitos. Opcional para Teclado/Mouse.">
-                        <div class="note" style="margin-top:2px;font-size:12px;">Opcional para Teclado/Mouse</div>
-                    </div>
-                    <div>
-                        <label>Nº WorkFlow</label>
-                        <input type="text" name="workflow" id="workflow" placeholder="Ex.: P-1234567">
-                    </div>
-                </div>
+                <label>Patrimônio (7 dígitos)</label>
+                <!-- REMOVIDO: required -->
+                <input type="text" name="patrimonio" id="patrimonio" pattern="\\d{7,}" inputmode="numeric" placeholder="Ex.: 1234567"
+                       title="Digite apenas números. Mínimo 7 dígitos. Opcional para Teclado/Mouse.">
+                <div class="note" style="margin-top:2px;font-size:12px;">Opcional para Teclado/Mouse</div>
             </div>
-             <div>
-                 <label>Data da movimentação</label>
-                 <input id="data_inicio" name="data_inicio" required>
-             </div>
-         </div>
+            <div>
+                <label>Nº WorkFlow</label>
+                <input type="text" name="workflow" id="workflow" placeholder="Ex.: P-1234567">
+            </div>
+            <div>
+                <label>Origem</label>
+                <input type="text" name="origem" id="origem" maxlength="10" placeholder="Ex.: CPCTBA">
+            </div>
+            <div class="col-data">
+                <label>Data da movimentação</label>
+                <input id="data_inicio" name="data_inicio" required>
+            </div>
+        </div>
 
         <label>Motivo</label>
         <select name="motivo" id="motivo_select" onchange="toggleOutroMotivo()" required>
@@ -845,6 +850,12 @@ def gerar_html_form(registros):
             }
         }
 
+        const origem = document.getElementById("origem").value.trim();
+        if (origem && origem.length > 10) {
+            alert("Origem deve ter no máximo 10 caracteres.");
+            return false;
+        }
+
         return true;
     }
 
@@ -1001,6 +1012,7 @@ def gerar_pagina_lista(registros):
         responsavel = r.get("responsavel", "")
         patrimonio = r.get("patrimonio", "")
         workflow = r.get("workflow", "")
+        origem = r.get("origem", "")
         motivo = r.get("motivo", "")
         hardware = r.get("hardware", "")
         marca = r.get("marca", r.get("marca_modelo", ""))
@@ -1128,6 +1140,7 @@ def gerar_pagina_lista(registros):
             f'<td>{tipo}</td>'
             f'<td>{responsavel}</td>'
             f'<td>{emprestado_para}</td>'
+            f'<td>{origem}</td>'
             f'<td>{patrimonio}</td>'
             f'<td>{workflow}</td>'
             f'<td>{motivo}</td>'
@@ -1353,11 +1366,12 @@ def gerar_pagina_lista(registros):
             <col style="width:5%;">   <!-- Tipo -->
             <col style="width:15%;">  <!-- Responsável -->
             <col style="width:12%;">  <!-- Emprestado para -->
+            <col style="width:5%;">   <!-- Origem -->
             <col style="width:5%;">   <!-- Patrimônio -->
             <col style="width:5%;">   <!-- Workflow -->
-            <col style="width:11%;">  <!-- Motivo -->
+            <col style="width:6%;">   <!-- Motivo (reduzido ~40%) -->
             <col style="width:7%;">   <!-- Hardware -->
-            <col style="width:7%;">   <!-- Marca -->
+            <col style="width:3.5%;"> <!-- Marca (reduzido pela metade) -->
             <col style="width:8%;">   <!-- Modelo -->
             <col style="width:5%;">   <!-- Data início -->
             <col style="width:5%;">   <!-- Data retorno -->
@@ -1370,6 +1384,7 @@ def gerar_pagina_lista(registros):
                 <th>Tipo</th>
                 <th>Responsável</th>
                 <th>Emprestado para</th>
+                <th>Origem</th>
                 <th>Patrimônio</th>
                 <th>Workflow</th>
                 <th>Motivo</th>
@@ -1421,6 +1436,9 @@ def gerar_pagina_lista(registros):
 
         <div class="export-left"><label><input type="checkbox" name="f_emprestado_para" id="f_emprestado_para"> <span>Emprestado para</span></label></div>
         <div class="export-right"><input type="text" name="emprestado_para_value" id="emprestado_para_value" placeholder="Texto a buscar"></div>
+
+        <div class="export-left"><label><input type="checkbox" name="f_origem" id="f_origem"> <span>Origem</span></label></div>
+        <div class="export-right"><input type="text" name="origem_value" id="origem_value" placeholder="Ex.: CPCTBA" maxlength="10"></div>
 
         <div class="export-left"><label><input type="checkbox" name="f_patrimonio" id="f_patrimonio"> <span>Patrimônio</span></label></div>
         <div class="export-right"><input type="text" name="patrimonio_value" id="patrimonio_value" placeholder="Ex.: 1234567"></div>
@@ -1666,6 +1684,12 @@ def gerar_pagina_lista(registros):
                 alert("Workflow inválido. Formatos aceitos: P-1234567 ou P-12345-00.");
                 return false;
             }
+        }
+
+        const origem = document.getElementById("origem").value.trim();
+        if (origem && origem.length > 10) {
+            alert("Origem deve ter no máximo 10 caracteres.");
+            return false;
         }
 
         return true;
@@ -1947,6 +1971,12 @@ class Servidor(BaseHTTPRequestHandler):
                     if qv:
                         filtered = [r for r in filtered if qv in str(r.get('emprestado_para','')).lower()]
 
+                # origem (substring)
+                if has('f_origem') and qs.get('origem_value'):
+                    ov = qs.get('origem_value', [''])[0].strip().lower()
+                    if ov:
+                        filtered = [r for r in filtered if ov in str(r.get('origem','')).lower()]
+
                 # patrimonio (substring)
                 if has('f_patrimonio') and qs.get('patrimonio_value'):
                     pv = qs.get('patrimonio_value', [''])[0].strip().lower()
@@ -2002,7 +2032,7 @@ class Servidor(BaseHTTPRequestHandler):
                         filtered = [r for r in filtered if in_range(r)]
 
             # campos do CSV (incluindo status)
-            campos = ["id", "tipo", "responsavel", "emprestado_para", "patrimonio", "workflow", "motivo",
+            campos = ["id", "tipo", "responsavel", "emprestado_para", "origem", "patrimonio", "workflow", "motivo",
                       "hardware", "marca", "modelo", "data_inicio", "data_retorno", "devolvido", "estoque",
                       "status", "client_ip", "registrado_em"]
 
@@ -2103,6 +2133,7 @@ class Servidor(BaseHTTPRequestHandler):
                 return self.responder_error("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos.")
 
             workflow = campos.get("workflow", [""])[0]
+            origem = campos.get("origem", [""])[0].strip()
             marca = campos.get("marca", [""])[0]
             modelo = campos.get("modelo", [""])[0]
             observacao = campos.get("observacao", [""])[0].strip()
@@ -2116,6 +2147,7 @@ class Servidor(BaseHTTPRequestHandler):
                 "responsavel": responsavel,
                 "patrimonio": patrimonio,
                 "workflow": workflow,
+                "origem": origem,
                 "data_inicio": data_inicio,
                 "motivo": motivo,
                 "hardware": hardware,
@@ -2210,6 +2242,7 @@ class Servidor(BaseHTTPRequestHandler):
                 "responsavel": original.get("responsavel", ""),
                 "patrimonio": original.get("patrimonio", ""),
                 "workflow": original.get("workflow", ""),
+                "origem": original.get("origem", ""),
                 # data_inicio do novo registro = hora do clique
                 "data_inicio": now_str,
                 "motivo": original.get("motivo", ""),
