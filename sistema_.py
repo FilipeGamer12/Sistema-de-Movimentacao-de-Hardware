@@ -624,7 +624,7 @@ def gerar_html_form(registros, current_user=None):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Controle de Hardware DEPPEN</title>
+<title>Controle de Hardware</title>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
 
@@ -3497,4 +3497,5 @@ if __name__ == "__main__":
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+
     httpd.server_close()
