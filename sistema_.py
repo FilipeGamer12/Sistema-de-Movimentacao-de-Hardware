@@ -6,8 +6,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 from socketserver import ThreadingMixIn
 from zoneinfo import ZoneInfo
+import os
+import hashlib
+import secrets
+import binascii
+import time
 
 ARQUIVO = "dados.json"
+USERS_FILE = "users.json"
+SESSIONS_FILE = "sessions.json"
+SESSION_TTL = 4 * 3600  # 4 horas em segundos
+PWD_ITERATIONS = 100_000
+PWD_SALT_BYTES = 16
 
 # Lista de responsáveis (usada para montar o select no frontend)
 RESPONSAVEIS = [
@@ -24,6 +34,102 @@ except:
     with open(ARQUIVO, "w", encoding="utf-8") as f:
         json.dump([], f, indent=4, ensure_ascii=False)
 
+def ensure_json_file(path, default):
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(default, f, ensure_ascii=False, indent=4)
+
+# garantir arquivos de usuários e sessões
+ensure_json_file(USERS_FILE, [{"username": "admin"}])  # cria admin vazio por padrão — defina seus usuários
+ensure_json_file(SESSIONS_FILE, [])
+
+def load_users():
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except Exception:
+            return []
+
+def save_users(users):
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False, indent=4)
+
+def find_user(users, username):
+    username = (username or "").strip()
+    for u in users:
+        if str(u.get("username","")).strip().lower() == username.lower():
+            return u
+    return None
+
+def hash_password(password, salt_bytes=None):
+    if salt_bytes is None:
+        salt = secrets.token_bytes(PWD_SALT_BYTES)
+    else:
+        salt = salt_bytes
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PWD_ITERATIONS)
+    return binascii.hexlify(salt).decode(), binascii.hexlify(dk).decode()
+
+def verify_password(password, salt_hex, hash_hex):
+    try:
+        salt = binascii.unhexlify(salt_hex)
+        expected = binascii.unhexlify(hash_hex)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PWD_ITERATIONS)
+        return secrets.compare_digest(dk, expected)
+    except Exception:
+        return False
+
+# SESSIONS
+def load_sessions():
+    with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except Exception:
+            return []
+
+def save_sessions(sessions):
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(sessions, f, ensure_ascii=False, indent=4)
+
+def create_session(username):
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    sessions = load_sessions()
+    sessions.append({"token": token, "username": username, "created_at": now})
+    save_sessions(sessions)
+    return token
+
+def validate_session(token):
+    if not token:
+        return None
+    sessions = load_sessions()
+    now = int(time.time())
+    valid_user = None
+    new_sessions = []
+    for s in sessions:
+        try:
+            if s.get("token") == token:
+                if (s.get("created_at", 0) + SESSION_TTL) > now:
+                    valid_user = s.get("username")
+                    new_sessions.append(s)
+                else:
+                    # expired -> skip (removes)
+                    continue
+            else:
+                # keep other sessions
+                if (s.get("created_at", 0) + SESSION_TTL) > now:
+                    new_sessions.append(s)
+        except Exception:
+            pass
+    # salvar sessões limpas (remove expiradas)
+    save_sessions(new_sessions)
+    return valid_user
+
+def remove_session(token):
+    if not token:
+        return
+    sessions = load_sessions()
+    sessions = [s for s in sessions if s.get("token") != token]
+    save_sessions(sessions)
 
 # ----------------------------- HELPERS (BR date) -----------------------------
 def parse_br_datetime(dt_str):
@@ -271,9 +377,146 @@ def gerar_pendencias_html(registros):
     html += '</div>'
     return html
 
+# ---------------------------- HTML LOGIN ----------------------------------------
+def gerar_login_page(users, message=""):
+    # users: lista de dicts de users (para popular select)
+    options = ""
+    for u in users:
+        username = u.get("username","")
+        has_password = "1" if u.get("password_hash") else "0"
+        options += f'<option value="{username}" data-has-pass="{has_password}">{username}</option>'
+
+    html = f"""
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login — Controle de Hardware</title>
+<style>
+:root {{ --bg: #0b0b0c; --muted:#9aa0a6; --card:#0f0f10; --border:#262626; --accent:#22a148; --accent-contrast:#071005; }}
+* {{ box-sizing: border-box; }}
+html,body{{height:100%; margin:0; font-family: Inter, Roboto, Arial, sans-serif; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;}}
+body{{
+  background: linear-gradient(180deg, #070707 0%, #0c0c0d 100%);
+  color: #e8e8e8;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:24px;
+}}
+
+.card{{
+  width:420px;
+  max-width:calc(100% - 48px);
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+  border:1px solid var(--border);
+  padding:20px;
+  border-radius:12px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.6);
+}}
+
+h1{{margin:0 0 8px 0;font-size:20px;}}
+.message{{padding:10px;border-radius:8px;background:#0f0f10;border:1px solid rgba(255,255,255,0.02);margin-bottom:12px;color:var(--muted);font-size:13px;}}
+
+.form-row{{margin-top:12px;}}
+label{{display:block;font-size:13px;color:var(--muted); margin-bottom:6px;}}
+.select, input[type="text"], input[type="password"], select {{
+  width:100%; padding:12px 14px; margin:0; background:#101010; border:1px solid var(--border); color:#eaeaea; border-radius:10px; font-size:14px; height:44px;
+}}
+select.select{{-webkit-appearance:none; -moz-appearance:none; appearance:none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) calc(1em + 2px), calc(100% - 13px) calc(1em + 2px); background-size: 6px 6px, 6px 6px; background-repeat: no-repeat; padding-right:40px;}}
+
+.checkbox-row{{display:flex; align-items:center; gap:8px; margin-top:12px; color:var(--muted); font-size:13px;}}
+.checkbox-row input{{width:16px; height:16px; margin:0;}}
+
+.actions{{display:flex; justify-content:flex-end; margin-top:16px;}}
+button.primary{{background:var(--accent); color:var(--accent-contrast); border:none; padding:10px 18px; border-radius:10px; cursor:pointer; font-weight:600; font-size:14px; height:44px;}}
+.note{{font-size:13px;color:var(--muted);margin-top:12px; line-height:1.35;}}
+
+/* responsivo: reduzir padding dos inputs em telas pequenas */
+@media (max-width:420px) {{
+  .card{{padding:16px;}}
+  .select, input[type="password"]{{height:42px; padding:10px 12px;}}
+  button.primary{{height:42px; padding:8px 14px;}}
+}}
+</style>
+</head>
+<body>
+  <div class="card" role="main" aria-label="Tela de Login">
+    <h1>Entrar — Controle de Hardware</h1>
+    {f'<div class="message">{message}</div>' if message else ''}
+    <form method="POST" action="/login" id="loginForm" autocomplete="off">
+      <div class="form-row">
+        <label for="login_username">Usuário</label>
+        <select name="username" id="login_username" class="select" required>
+          <option value="" disabled selected>Selecione o usuário...</option>
+          {options}
+        </select>
+      </div>
+
+      <div class="form-row">
+        <label id="senha_label" for="login_password">Senha</label>
+        <input type="password" name="password" id="login_password" placeholder="Digite sua senha" autocomplete="new-password" required>
+      </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" name="remember" id="remember">
+        <label for="remember" style="margin:0;">Manter conectado (expira em 4 horas)</label>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="primary">Entrar</button>
+      </div>
+    </form>
+    <div class="note">Se for o primeiro acesso do usuário (senha não definida) o campo de senha será salvo como nova senha.</div>
+  </div>
+
+<script>
+(function(){{
+  const sel = document.getElementById('login_username');
+  const pwd = document.getElementById('login_password');
+  const label = document.getElementById('senha_label');
+
+  function updateLabel() {{
+    const opt = sel.selectedOptions && sel.selectedOptions[0];
+    if (!opt) return;
+    const has = opt.dataset.hasPass;
+    if (has === '0') {{
+      label.innerText = 'Defina uma senha (primeiro login)';
+      pwd.placeholder = 'Defina uma senha (mínimo 6 caracteres)';
+      pwd.value = "";
+      pwd.autocomplete = "new-password";
+    }} else {{
+      label.innerText = 'Senha';
+      pwd.placeholder = 'Digite sua senha';
+      pwd.autocomplete = "current-password";
+    }}
+  }}
+  sel.addEventListener('change', updateLabel);
+
+  // tenta selecionar o primeiro usuário real automaticamente (se houver)
+  (function autoSelectFirst() {{
+    if (!sel) return;
+    // procurar primeira opção que não é placeholder
+    for (let i = 0; i < sel.options.length; i++) {{
+      const o = sel.options[i];
+      if (o.value && o.disabled === false && o.value !== "") {{
+        sel.selectedIndex = i;
+        break;
+      }}
+    }}
+    updateLabel();
+  }})();
+}})();
+</script>
+
+</body>
+</html>
+"""
+    return html
 
 # ----------------------------- HTML TEMPLATE (INDEX) -----------------------------
-def gerar_html_form(registros):
+def gerar_html_form(registros, current_user=None):
     # não preencher aqui com a hora do servidor — o cliente (navegador) preencherá com sua hora local
 
     # monta options do select responsável a partir da array RESPONSAVEIS
@@ -283,6 +526,97 @@ def gerar_html_form(registros):
 
     # pendencias (inclui atrasos no topo)
     pendencias_html = gerar_pendencias_html(registros)
+
+        # ----------------- Painel de Manutenção (somente para admin) -----------------
+    admin_panel_html = ""
+    if current_user and str(current_user).lower() == "admin":
+        # build options list of users for selects
+        users_list = load_users()
+        user_options = ""
+        for u in users_list:
+            uname = u.get("username", "")
+            user_options += f'<option value="{uname}">{uname}</option>'
+
+        admin_panel_html = f'''
+    <div class="right-card card">
+      <h3 style="margin-top:0;margin-bottom:10px;">Painel de Manutenção</h3>
+
+      <div style="margin-bottom:12px;">
+        <form method="POST" action="/admin_add_user" onsubmit="return adminAddUserValidate(this);">
+          <label style="font-size:13px;color:var(--muted);">Adicionar usuário</label>
+          <input name="username" placeholder="nome do usuário" style="width:100%;padding:8px;border-radius:8px;margin-top:6px;border:1px solid var(--border);background:#101010;color:#eaeaea;" required />
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button type="submit" style="background:#2e7d32;color:#fff;border:none;padding:8px 10px;border-radius:8px;cursor:pointer;">Adicionar</button>
+          </div>
+        </form>
+      </div>
+
+      <hr style="border:0;border-top:1px solid rgba(255,255,255,0.03);margin:8px 0;">
+
+      <div style="margin-bottom:12px;">
+        <form method="POST" action="/admin_reset_password" onsubmit="return adminResetValidate(this);">
+          <label style="font-size:13px;color:var(--muted);">Forçar redefinição de senha</label>
+          <div style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:6px;">
+            Ao forçar a redefinição, a senha atual será removida e o usuário deverá criar uma nova senha no próximo login.
+          </div>
+          <select name="target_user" style="width:100%;padding:8px;border-radius:8px;margin-top:6px;border:1px solid var(--border);background:#101010;color:#eaeaea;" required>
+            <option value="" disabled selected>Selecione usuário...</option>
+            {user_options}
+          </select>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button type="submit" style="background:#1565c0;color:#fff;border:none;padding:8px 10px;border-radius:8px;cursor:pointer;">Forçar redefinição</button>
+          </div>
+        </form>
+      </div>
+
+      <hr style="border:0;border-top:1px solid rgba(255,255,255,0.03);margin:8px 0;">
+
+      <div>
+        <form method="POST" action="/admin_delete_user" onsubmit="return adminDeleteConfirm(this);">
+          <label style="font-size:13px;color:var(--muted);">Excluir usuário</label>
+          <select name="target_user" id="delete_user_select" style="width:100%;padding:8px;border-radius:8px;margin-top:6px;border:1px solid var(--border);background:#101010;color:#eaeaea;" required>
+            <option value="" disabled selected>Selecione usuário...</option>
+            {user_options}
+          </select>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button type="submit" style="background:#b71c1c;color:#fff;border:none;padding:8px 10px;border-radius:8px;cursor:pointer;">Excluir</button>
+          </div>
+        </form>
+      </div>
+
+    </div>
+
+    <script>
+    function adminAddUserValidate(form) {{
+      const u = form.username.value.trim();
+      if(!u) {{ alert('Digite um nome de usuário.'); return false; }}
+      return true;
+    }}
+    function adminResetValidate(form) {{
+      const u = form.target_user.value;
+      if (!u) {{
+          alert('Selecione um usuário.');
+          return false;
+      }}
+      // confirmação extra se for o admin
+      if (u.toLowerCase() === 'admin') {{
+         if (!confirm('Você está forçando redefinição para o usuário "admin". Confirma?')) {{
+          return false;
+          }}
+    }}
+    return confirm('Ao confirmar, a senha atual será removida e o usuário ' + u + ' deverá definir uma nova senha no próximo login. Continuar?');
+    }}
+    function adminDeleteConfirm(form) {{
+      const u = form.target_user.value;
+      if(!u) {{ alert('Selecione um usuário.'); return false; }}
+      if(u.toLowerCase() === 'admin') {{
+        alert('Não é permitido excluir o usuário admin.');
+        return false;
+      }}
+      return confirm('Confirma exclusão do usuário: ' + u + ' ?');
+    }}
+    </script>
+'''
 
     html = """
 <!doctype html>
@@ -351,6 +685,17 @@ def gerar_html_form(registros):
         max-width: calc(100vw - 360px);
         margin:0;
     }
+    .right-card {
+    flex: 0 0 320px;
+    width: 320px;
+    max-width: 320px;
+    margin: 0;
+    padding: 18px;
+    }
+    @media (max-width: 920px) {
+    .dashboard { flex-direction: column; align-items: stretch; }
+    .left-card, .card, .right-card { width: 100%; max-width:none; }
+    }
 
     h1 { margin:0 0 12px 0; font-size:20px; }
 
@@ -402,25 +747,31 @@ def gerar_html_form(registros):
 
     /* botões de ação */
     .btn-action {
-         display:inline-flex;
-         align-items:center;
-         justify-content:center;
-         gap:0;
-         width:22px;
-         height:22px;
-         padding:0;
-         box-sizing:border-box;
-         border-radius:6px;
-         font-weight:700;
-         cursor:pointer;
-         border: none;
-         font-size:16px;
-         line-height:0;
-         background:transparent;
-         color:var(--muted);
-         vertical-align: middle;
-     }
-     .btn-action:hover { filter:brightness(1.05); transform: translateY(-1px); }
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        width:28px;
+        height:28px;
+        padding:0;
+        box-sizing:border-box;
+        border-radius:6px;
+        font-weight:700;
+        cursor:pointer;
+        border: none;
+        font-size:16px;
+        line-height:0;
+        background:transparent;
+        color:var(--muted);
+        vertical-align: middle;
+    }
+    .btn-action svg {
+        width:18px;
+        height:18px;
+        display:block;
+        margin:0;
+        vertical-align:middle;
+    }
+    .btn-action:hover { filter:brightness(1.05); transform: translateY(-1px); }
     .btn-devolver {
         background: linear-gradient(180deg, #66dd88, #4caf50);
         color:#062009;
@@ -555,9 +906,10 @@ def gerar_html_form(registros):
   <div class="card" role="main" aria-label="Registrar Movimentação">
     <div class="topbar">
       <h1>Registrar Movimentação</h1>
-      <div>
-        <!-- link anterior mantido (pode ser removido se desejar) -->
+      <div style="display:flex;gap:10px;align-items:center;">
         <a class="link-lista" href="/lista">Ver Registros</a>
+        <span style="color:var(--muted);font-size:13px;">{user_display}</span>
+        <a class="link-lista" href="/logout" style="margin-left:6px;">Sair</a>
       </div>
     </div>
 
@@ -659,6 +1011,9 @@ def gerar_html_form(registros):
       </div>
     </div>
   </div>
+
+  <!-- Painel de Manutenção (aparecerá apenas para admin) -->
+""" + (admin_panel_html if current_user and str(current_user).lower() == "admin" else "") + """
 </div>
 
 <!-- Modal Extender / Observação ficam inalterados -->
@@ -703,6 +1058,71 @@ def gerar_html_form(registros):
   </div>
 </div>
 
+<!-- Modal de Edição (admin) -->
+<div id="modal_edit" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;
+     background:rgba(0,0,0,0.6);align-items:center;justify-content:center;z-index:9999;">
+  <div id="modal_edit_box" style="background:#1b1b1b;padding:18px;border-radius:10px;width:720px;max-width:95%;">
+    <h3 style="margin-top:0;margin-bottom:8px;">Editar registro <span id="edit_id_display"></span></h3>
+    <form method="POST" action="/editar_registro" id="editForm">
+      <input type="hidden" name="id" id="edit_id">
+      <div style="display:flex;gap:12px;">
+        <div style="flex:1;">
+          <label>Tipo</label>
+          <select name="tipo" id="edit_tipo" required>
+            <option value="entrada">Entrada</option>
+            <option value="saida">Saída</option>
+            <option value="emprestimo">Empréstimo</option>
+          </select>
+
+          <label>Responsável</label>
+          <input type="text" name="responsavel" id="edit_responsavel" required>
+
+          <label>Patrimônio</label>
+          <input type="text" name="patrimonio" id="edit_patrimonio">
+
+          <label>Workflow</label>
+          <input type="text" name="workflow" id="edit_workflow">
+
+          <label>Origem</label>
+          <input type="text" name="origem" id="edit_origem" maxlength="10">
+        </div>
+
+        <div style="flex:1;">
+          <label>Motivo</label>
+          <input type="text" name="motivo" id="edit_motivo" required>
+
+          <label>Hardware</label>
+          <input type="text" name="hardware" id="edit_hardware" required>
+
+          <label>Marca</label>
+          <input type="text" name="marca" id="edit_marca" required>
+
+          <label>Modelo</label>
+          <input type="text" name="modelo" id="edit_modelo" required>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:12px;margin-top:10px;align-items:center;">
+        <div style="flex:1;">
+          <label>Data da movimentação</label>
+          <input name="data_inicio" id="edit_data_inicio" />
+        </div>
+        <div style="flex:1;">
+          <label>Emprestado para</label>
+          <input name="emprestado_para" id="edit_emprestado_para" />
+          <label style="margin-top:8px;">Data prevista de devolução</label>
+          <input name="data_retorno" id="edit_data_retorno" />
+        </div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+        <button type="button" class="ghost" onclick="fecharEditar()">Cancelar</button>
+        <button type="submit" class="primary">Salvar alterações</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 <script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/pt.js"></script>
 <script>
@@ -909,61 +1329,158 @@ def gerar_html_form(registros):
     }
     function fecharObs(){ try{ document.getElementById('modal_obs').style.display = 'none'; }catch(e){} }
 
+    // abrir modal de edição (os dados chegam serializados como objeto)
+    function abrirEditar(id, record) {
+        try {
+            const modal = document.getElementById("modal_edit");
+            if (!modal) return;
+            document.getElementById("edit_id").value = id;
+            document.getElementById("edit_id_display").innerText = "#" + id;
+
+            // preencher campos (verifica existência)
+            const setVal = (el, v) => { if (el) el.value = v || ""; }
+            setVal(document.getElementById("edit_tipo"), record.tipo || "");
+            setVal(document.getElementById("edit_responsavel"), record.responsavel || "");
+            setVal(document.getElementById("edit_patrimonio"), record.patrimonio || "");
+            setVal(document.getElementById("edit_workflow"), record.workflow || "");
+            setVal(document.getElementById("edit_origem"), record.origem || "");
+            setVal(document.getElementById("edit_motivo"), record.motivo || "");
+            setVal(document.getElementById("edit_hardware"), record.hardware || "");
+            setVal(document.getElementById("edit_marca"), record.marca || "");
+            setVal(document.getElementById("edit_modelo"), record.modelo || "");
+            setVal(document.getElementById("edit_emprestado_para"), record.emprestado_para || "");
+            // datas: setar valor compatível com flatpickr (d/m/Y H:i)
+            setVal(document.getElementById("edit_data_inicio"), record.data_inicio || "");
+            setVal(document.getElementById("edit_data_retorno"), record.data_retorno || "");
+
+            // inicializar flatpickr nos campos caso ainda não tenha
+            try {
+                if (window.flatpickr) {
+                    if (!document.querySelector("#edit_data_inicio")._flatpickr) {
+                        flatpickr("#edit_data_inicio", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
+                    }
+                    if (!document.querySelector("#edit_data_retorno")._flatpickr) {
+                        flatpickr("#edit_data_retorno", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
+                    }
+                    // setar datas se vierem
+                    try { document.querySelector("#edit_data_inicio")._flatpickr.setDate(record.data_inicio || null, true); } catch(e){}
+                    try { document.querySelector("#edit_data_retorno")._flatpickr.setDate(record.data_retorno || null, true); } catch(e){}
+                }
+            } catch(e){ console.warn("flatpickr:", e); }
+
+            modal.style.display = "flex";
+        } catch(e) {
+            console.error("abrirEditar erro:", e);
+        }
+    }
+
+    function fecharEditar() {
+        const modal = document.getElementById("modal_edit");
+        if (!modal) return;
+        modal.style.display = "none";
+    }
+
     document.addEventListener("DOMContentLoaded", function() {
     });
+
+    // Funções para o modal de edição
+    window.abrirEditar = function(id, record) {
+        try {
+            const modal = document.getElementById("modal_edit");
+            if (!modal) return;
+            document.getElementById("edit_id").value = id;
+            document.getElementById("edit_id_display").innerText = "#" + id;
+
+            // Preenche campos
+            const setVal = (el, v) => { if (el) el.value = v || ""; };
+            setVal(document.getElementById("edit_tipo"), record.tipo || "");
+            setVal(document.getElementById("edit_responsavel"), record.responsavel || "");
+            setVal(document.getElementById("edit_patrimonio"), record.patrimonio || "");
+            setVal(document.getElementById("edit_workflow"), record.workflow || "");
+            setVal(document.getElementById("edit_origem"), record.origem || "");
+            setVal(document.getElementById("edit_motivo"), record.motivo || "");
+            setVal(document.getElementById("edit_hardware"), record.hardware || "");
+            setVal(document.getElementById("edit_marca"), record.marca || "");
+            setVal(document.getElementById("edit_modelo"), record.modelo || "");
+            setVal(document.getElementById("edit_emprestado_para"), record.emprestado_para || "");
+            setVal(document.getElementById("edit_data_inicio"), record.data_inicio || "");
+            setVal(document.getElementById("edit_data_retorno"), record.data_retorno || "");
+
+            // Inicializa flatpickr nos campos de data se ainda não tiver
+            try {
+                if (window.flatpickr) {
+                    if (!document.querySelector("#edit_data_inicio")._flatpickr) {
+                        flatpickr("#edit_data_inicio", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
+                    }
+                    if (!document.querySelector("#edit_data_retorno")._flatpickr) {
+                        flatpickr("#edit_data_retorno", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
+                    }
+                    // Força a data no flatpickr
+                    document.querySelector("#edit_data_inicio")._flatpickr.setDate(record.data_inicio || null, true);
+                    document.querySelector("#edit_data_retorno")._flatpickr.setDate(record.data_retorno || null, true);
+                }
+            } catch(e) { console.warn("flatpickr edit:", e); }
+
+            modal.style.display = "flex";
+        } catch(e) {
+            console.error("Erro ao abrir editar:", e);
+        }
+    };
+
+    window.fecharEditar = function() {
+        const modal = document.getElementById("modal_edit");
+        if (modal) modal.style.display = "none";
+    };
+
 </script>
 
 </body>
 </html>
 """
+    user_display = f"Olá, {current_user}" if current_user else ""
+    html = html.replace("{user_display}", user_display)
     return html
 
 
 # ----------------------------- LISTA / REGISTROS PAGE -----------------------------
-def gerar_pagina_lista(registros):
-    # --- CORREÇÃO: gerar responsaveis_html localmente (evita NameError) ---
-    responsaveis_html = ""
+def gerar_pagina_lista(registros, current_user=None):
+    """
+    Gera a página /lista com a tabela de registros e modal de edição.
+    current_user: nome do usuário atual (string) — usado para liberar ações de admin.
+    """
+    # montar options de responsáveis (usado no modal de edição e no modal de exportação)
+    responsaveis_options = ""
     for r in RESPONSAVEIS:
-        responsaveis_html += '<option value="{}">{}</option>'.format(r, r)
+        responsaveis_options += '<option value="{}">{}</option>'.format(r, r)
 
-    # --- calcular pendências/atrasos similar a gerar_pendencias_html ---
+    # calcular pendências/atrasos similar a gerar_pendencias_html
     now = sp_now_naive()
     workflow_map = {}
-    for r in registros:
-        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
-            # ainda adicionamos ao mapa para checagem de workflow, mesmo se oculto
-            wf = (r.get("workflow") or "").strip()
-            if wf:
-                workflow_map.setdefault(wf, []).append(r)
-        else:
-            wf = (r.get("workflow") or "").strip()
-            if wf:
-                workflow_map.setdefault(wf, []).append(r)
+    for rec in registros:
+        wf = (rec.get("workflow") or "").strip()
+        if wf:
+            workflow_map.setdefault(wf, []).append(rec)
 
     atrasos_ids = set()
-    for r in registros:
-        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
-            # pendências/atrasos normalmente não consideram ocultos/estoque/devolvidos,
-            # mas seguimos a lógica do painel (ignora ocultos/estoque/devolvido)
-            pass
-        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
+    for rec in registros:
+        if rec.get("oculto", False) or rec.get("estoque", False) or rec.get("devolvido", False):
             continue
-        if r.get("tipo") == "emprestimo" and not r.get("devolvido", False):
-            dt_raw = r.get("data_retorno", "")
+        if rec.get("tipo") == "emprestimo" and not rec.get("devolvido", False):
+            dt_raw = rec.get("data_retorno", "")
             dt = parse_br_datetime(dt_raw)
             if dt and dt <= now:
-                atrasos_ids.add(str(r.get("id", "")))
+                atrasos_ids.add(str(rec.get("id", "")))
 
     pendencias_ids = set()
-    for r in registros:
-        if r.get("oculto", False) or r.get("estoque", False) or r.get("devolvido", False):
+    for rec in registros:
+        if rec.get("oculto", False) or rec.get("estoque", False) or rec.get("devolvido", False):
             continue
-        if r.get("tipo") != "entrada":
+        if rec.get("tipo") != "entrada":
             continue
-        motivo = (r.get("motivo") or "").strip().lower()
-        if motivo == "outros" or motivo == "outro" or motivo == "other":
+        motivo = (rec.get("motivo") or "").strip().lower()
+        if motivo in ("outros", "outro", "other"):
             continue
-        data_inicio_raw = r.get("data_inicio", "")
+        data_inicio_raw = rec.get("data_inicio", "")
         dt_inicio = parse_br_datetime(data_inicio_raw)
         if not dt_inicio:
             continue
@@ -971,21 +1488,20 @@ def gerar_pagina_lista(registros):
         if delta_days < 7:
             continue
 
-        wf = (r.get("workflow") or "").strip()
+        wf = (rec.get("workflow") or "").strip()
         tem_saida_com_wf = False
         if wf:
             others = workflow_map.get(wf, [])
             for o in others:
-                if o is r:
+                if o is rec:
                     continue
                 if o.get("tipo") == "saida" and not o.get("oculto", False):
                     tem_saida_com_wf = True
                     break
 
-        # última observação registrada no próprio registro (se houver)
         last_obs_date = None
         try:
-            obs_list = r.get("observacoes", []) or []
+            obs_list = rec.get("observacoes", []) or []
             for ob in obs_list:
                 reg_em = ob.get("registrado_em") or ob.get("registered_at") or ""
                 dt_obs = parse_br_datetime(reg_em)
@@ -1002,32 +1518,31 @@ def gerar_pagina_lista(registros):
             obs_antiga = True
 
         if (not tem_saida_com_wf) and obs_antiga:
-            pendencias_ids.add(str(r.get("id", "")))
+            pendencias_ids.add(str(rec.get("id", "")))
 
-    # gera linhas da tabela (não removendo os ocultos; marcamos com data-atributos)
+    # gera linhas da tabela
     linhas = ""
     for r in registros:
         id_ = r.get("id", "")
-        tipo = r.get("tipo", "")
-        responsavel = r.get("responsavel", "")
-        patrimonio = r.get("patrimonio", "")
-        workflow = r.get("workflow", "")
-        origem = r.get("origem", "")
-        motivo = r.get("motivo", "")
-        hardware = r.get("hardware", "")
-        marca = r.get("marca", r.get("marca_modelo", ""))
-        modelo = r.get("modelo", "")
-        data_inicio = r.get("data_inicio", "")
-        emprestado_para = r.get("emprestado_para", "")
-        data_retorno = r.get("data_retorno", "")
+        tipo = r.get("tipo", "") or ""
+        responsavel = r.get("responsavel", "") or ""
+        patrimonio = r.get("patrimonio", "") or ""
+        workflow = r.get("workflow", "") or ""
+        origem = r.get("origem", "") or ""
+        motivo = r.get("motivo", "") or ""
+        hardware = r.get("hardware", "") or ""
+        marca = r.get("marca", r.get("marca_modelo", "")) or ""
+        modelo = r.get("modelo", "") or ""
+        data_inicio = r.get("data_inicio", "") or ""
+        emprestado_para = r.get("emprestado_para", "") or ""
+        data_retorno = r.get("data_retorno", "") or ""
         devolvido = bool(r.get("devolvido", False))
-        observacao = r.get("observacao", "")
         estoque = bool(r.get("estoque", False))
         oculto = bool(r.get("oculto", False))
 
         id_str = str(id_)
 
-        # --- cálculo de atraso (mantém) ---
+        # cálculo de atraso
         atrasado = False
         atraso_html = ""
         try:
@@ -1041,50 +1556,70 @@ def gerar_pagina_lista(registros):
             atrasado = False
             atraso_html = ""
 
-        # botão observação (sempre aparece). Passa lista de observações serializada para o JS.
+        # serializar observações (para modal)
         try:
             obs_list = r.get("observacoes", []) or []
             safe_obs_json = json.dumps(obs_list, ensure_ascii=False).replace("</", "<\\/").replace("'", "\\'")
         except Exception:
             safe_obs_json = "[]"
 
+        # ---------- Lógica para exibir botão de edição ----------
+        pode_editar = False
+        if current_user and str(current_user).lower() == "admin":
+            pode_editar = True
+        else:
+            # verifica se o usuário atual é o criador do registro
+            criador = r.get("oculto_meta", {}).get("registrado_por")
+            if criador and str(criador).lower() == str(current_user).lower():
+                # verifica se ainda está dentro do prazo de 24h
+                registrado_em_str = r.get("oculto_meta", {}).get("registrado_em")
+                if registrado_em_str:
+                    dt_registro = parse_br_datetime(registrado_em_str)
+                    if dt_registro:
+                        agora = sp_now_naive()
+                        diferenca = agora - dt_registro
+                        if diferenca.total_seconds() < 24 * 3600:
+                            # verifica se não há observações
+                            if not r.get("observacoes"):
+                                pode_editar = True
+
+        # botões
         botao_observacao = (
             f'<span style="display:inline-flex;align-items:center;">'
             f'<button class="btn-action btn-observacao" title="Ver observações" onclick=\'abrirObs({id_}, {safe_obs_json})\' type="button">'
             '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
-            '<path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm.88 15h-1.75v-1.75h1.75V17zm0-3.5h-1.75V6.5h1.75v7z"/>'
+            '<path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zm0 12.5c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/>'
             '</svg>'
             '</button>'
             '</span>'
         )
 
-        # botões padrões (devolver/extender/estoque/excluir) - simplificados; mantemos os existentes quando necessário
         botao_devolver = ""
         botao_extender = ""
         botao_estoque = ""
         if not devolvido:
             botao_devolver = (
                 '<form method="POST" action="/retornar" style="display:inline-flex;align-items:center;margin:0;">'
-                 f'<input type="hidden" name="id" value="{id_}">'
-                 '<button type="submit" class="btn-action btn-devolver" title="Retornar máquina">'
-                 '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
-                 '<path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19l12-12-1.4-1.4z"/>'
-                 '</svg>'
-                 '</button>'
-                 '</form>'
-             )
+                f'<input type="hidden" name="id" value="{id_}">'
+                '<button type="submit" class="btn-action btn-devolver" title="Retornar máquina">'
+                '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                '<path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19l12-12-1.4-1.4z"/>'
+                '</svg>'
+                '</button>'
+                '</form>'
+            )
             if tipo == "emprestimo":
                 data_retorno_br = normalize_br_datetime_str(data_retorno) if data_retorno else ""
                 safe_data = data_retorno_br.replace("'", "\\'")
                 botao_extender = (
-                     f'<span style="display:inline-flex;align-items:center;">'
-                     f'<button class="btn-action btn-estender" title="Estender empréstimo" onclick="abrirExtensao({id_}, \'{safe_data}\')" type="button">'
-                      '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
-                      '<path fill="currentColor" d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .34-.03.67-.09.99L19 14.5c.06-.33.09-.67.09-1.01 0-4.42-3.58-8-8-8zM6.09 9.01C6.03 9.33 6 9.66 6 10c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6 0-.34.03-.67.09-.99L6.09 9.01z"/>'
-                      '</svg>'
-                      '</button>'
-                     '</span>'
-                  )
+                    f'<span style="display:inline-flex;align-items:center;">'
+                    f'<button class="btn-action btn-estender" title="Estender empréstimo" onclick="abrirExtensao({id_}, \'{safe_data}\')" type="button">'
+                    '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                    '<path fill="currentColor" d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .34-.03.67-.09.99L19 14.5c.06-.33.09-.67.09-1.01 0-4.42-3.58-8-8-8zM6.09 9.01C6.03 9.33 6 9.66 6 10c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6 0-.34.03-.67.09-.99L6.09 9.01z"/>'
+                    '</svg>'
+                    '</button>'
+                    '</span>'
+                )
         if tipo == "entrada" and not devolvido:
             estoque_status = "Remover do estoque" if estoque else "Colocar em estoque"
             botao_estoque = (
@@ -1110,7 +1645,56 @@ def gerar_pagina_lista(registros):
             '</form>'
         )
 
-        # prioridade: Excluído (oculto) > Devolvido > Atrasado > Em estoque > Ativo
+        # botão Editar
+        botao_editar = ""
+        if pode_editar:
+            try:
+                record_for_js = {
+                    "id": id_,
+                    "tipo": tipo,
+                    "responsavel": responsavel,
+                    "patrimonio": patrimonio,
+                    "workflow": workflow,
+                    "origem": origem,
+                    "motivo": motivo,
+                    "hardware": hardware,
+                    "marca": marca,
+                    "modelo": modelo,
+                    "data_inicio": data_inicio,
+                    "emprestado_para": emprestado_para,
+                    "data_retorno": data_retorno,
+                    "devolvido": devolvido,
+                    "estoque": estoque
+                }
+                safe_record_json = json.dumps(record_for_js, ensure_ascii=False).replace("</", "<\\/").replace('"', "&quot;")
+            except Exception:
+                safe_record_json = "{}"
+
+            botao_editar = (
+                f'<span style="display:inline-flex;align-items:center;">'
+                f'<button class="btn-action btn-edit" title="Editar registro" type="button" data-record="{safe_record_json}">'
+                '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                '<path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z"/>'
+                '</svg>'
+                '</button>'
+                '</span>'
+            )
+
+        # botão Restaurar (admin, apenas se oculto)
+        botao_restaurar = ""
+        if oculto and current_user and str(current_user).lower() == "admin":
+            botao_restaurar = (
+                '<form method="POST" action="/restaurar" style="display:inline-flex;align-items:center;">'
+                f'<input type="hidden" name="id" value="{id_}">'
+                '<button type="submit" class="btn-action btn-restore" title="Restaurar registro">'
+                '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+                '<path fill="currentColor" d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/>'
+                '</svg>'
+                '</button>'
+                '</form>'
+            )
+
+        # prioridade do status
         if oculto:
             status = "<span style='color:#ff5050;font-weight:700;'>Excluído</span>"
         else:
@@ -1126,11 +1710,9 @@ def gerar_pagina_lista(registros):
             else:
                 status = "Ativo" if tipo == "emprestimo" else ""
 
-        # marcar pendencia/atraso
         is_pendencia = id_str in pendencias_ids or id_str in atrasos_ids
         is_atraso = id_str in atrasos_ids
 
-        # adicionar data-atributos para filtragem client-side e classe para ocultos
         tr_class = "oculto-row" if oculto else ""
         linhas += (
             f'<tr class="{tr_class}" data-id="{id_}" data-devolvido="{str(devolvido).lower()}" '
@@ -1150,11 +1732,10 @@ def gerar_pagina_lista(registros):
             f'<td>{data_inicio or ""}</td>'
             f'<td>{data_retorno or ""}</td>'
             f'<td>{status}</td>'
-            f'<td><div style="display:flex;gap:6px;align-items:center;">{botao_devolver}{botao_extender}{botao_observacao}{botao_estoque}{botao_excluir}</div></td>'
+            f'<td><div style="display:flex;gap:8px;align-items:center;">{botao_devolver}{botao_extender}{botao_observacao}{botao_estoque}{botao_editar}{botao_restaurar}{botao_excluir}</div></td>'
             '</tr>'
         )
 
-    # inserir o select de visão entre a pesquisa e o botão de ordem e JS para controlar as views
     page = """
 <!doctype html>
 <html lang="pt-BR">
@@ -1166,7 +1747,7 @@ def gerar_pagina_lista(registros):
 <style>
     :root {
         --bg:#0f0f10; --card:#111; --muted:#9aa0a6; --border:#222; --accent:#4caf50;
-        --accent-2:#3aa0ff;
+        --accent-2:#3aa0ff; --input-bg: #1f1f20;
     }
     body { background:var(--bg); color:#eaeaea; font-family:Inter, Arial; margin:0; padding:20px; }
     .container { max-width:calc(100vw - 40px); margin:0 auto; }
@@ -1186,7 +1767,6 @@ def gerar_pagina_lista(registros):
     .small { font-size:12px; color:var(--muted); }
     form.inline { display:inline; }
 
-    /* estilo específico para o seletor de visão */
     #view_selector {
         padding:8px 10px;
         border-radius:8px;
@@ -1198,100 +1778,127 @@ def gerar_pagina_lista(registros):
         appearance: none;
     }
 
-    /* linhas ocultas (excluídas) aparecem em vermelho */
     tr.oculto-row td { color: #ff6b6b; }
 
+    /* BOTÕES DE AÇÃO */
     .btn-action {
-         display:inline-flex;
-         align-items:center;
-         justify-content:center;
-         gap:0;
-         width:22px;
-         height:22px;
-         padding:0;
-         box-sizing:border-box;
-         border-radius:6px;
-         font-weight:700;
-         cursor:pointer;
-         border: none;
-         font-size:16px;
-         line-height:0;
-         background:transparent;
-         color:var(--muted);
-         vertical-align: middle;
-     }
-     .btn-action:hover { filter:brightness(1.05); transform: translateY(-1px); }
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        box-sizing: border-box;
+        border-radius: 6px;
+        font-weight: 700;
+        cursor: pointer;
+        border: none;
+        font-size: 16px;
+        line-height: 0;
+        background: transparent;
+        color: var(--muted);
+        vertical-align: middle;
+    }
+    .btn-action svg {
+        width: 16px;
+        height: 16px;
+        display: block;
+        margin: 0;
+        vertical-align: middle;
+    }
+    .btn-action:hover {
+        filter: brightness(1.05);
+        transform: translateY(-1px);
+    }
 
     .btn-devolver {
         background: linear-gradient(180deg, #66dd88, #4caf50);
         color:#062009;
-        border: none;
     }
     .btn-estender {
         background: linear-gradient(180deg, #8fd6ff, #3aa0ff);
         color:#022938;
-        border: none;
     }
     .btn-excluir {
         background: linear-gradient(180deg, #ff8b8b, #ff6b6b);
         color:#160000;
-        border: none;
     }
     .btn-estoque {
         background: linear-gradient(180deg, #3a6ea5, #1e3a5f);
         color:#ffffff;
-        border: none;
     }
-    .btn-excluir svg { width:18px; height:18px; display:block; margin:0; vertical-align:middle; }
-    .btn-action svg { width:16px; height:16px; display:block; margin:0; vertical-align:middle; }
-    .btn-observacao { background: linear-gradient(180deg,#ffd97a,#ffcc33); color:#082010; border:none; }
-    .btn-observacao svg { width:16px; height:16px; display:block; margin:0; vertical-align:middle; }
-
-    /* Força layout da tabela de observações para respeitar colgroup */
-    #modal_obs table#obs_table,
-    #modal_extender table#obs_table {
-      table-layout: fixed !important;
-      width: 100% !important;
-      border-collapse: collapse;
+    .btn-observacao {
+        background: linear-gradient(180deg,#ffd97a,#ffcc33);
+        color:#082010;
     }
-
-    #modal_obs table#obs_table col:first-child,
-    #modal_extender table#obs_table col:first-child {
-      width: 130px !important;
+    .btn-edit {
+        background: linear-gradient(180deg, #ffb347, #ff8c00) !important;
+        color: #2b1b00 !important;
+        border: 1px solid rgba(255,140,0,0.18) !important;
+        box-shadow: 0 6px 14px rgba(255,140,0,0.12) !important;
+    }
+    .btn-restore {
+        background: linear-gradient(180deg, #2e7d32, #1b5e20) !important;
+        color:#e8f5e9 !important;
+        border: 1px solid rgba(20,90,30,0.18) !important;
+        box-shadow: 0 6px 14px rgba(10,60,20,0.12) !important;
     }
 
-    #modal_obs table#obs_table col:last-child,
-    #modal_extender table#obs_table col:last-child {
-      width: auto !important;
-    }
-
-    #modal_obs table#obs_table td:first-child,
-    #modal_extender table#obs_table td:first-child {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    /* Modal Export CSS: deixa visual igual ao formulário */
-    #modal_export {
+    /* Modais - estilo igual ao de observações */
+    #modal_edit, #modal_extender, #modal_obs, #modal_export {
         display:none;
         position:fixed;
         top:0; left:0; width:100%; height:100%;
         background:rgba(0,0,0,0.6);
-        align-items:center; justify-content:center;
-        z-index:11000;
+        align-items:center;
+        justify-content:center;
+        z-index:10000;
     }
-    #modal_export .modal-inner {
+    .modal-inner, #modal_edit .modal-inner, #modal_obs > div, #modal_extender > div {
         background:#1b1b1b;
-        padding:18px;
+        padding:22px;
         border-radius:10px;
-        width:560px;
+        width:720px;
         max-width:94vw;
         box-shadow:0 6px 18px rgba(0,0,0,0.7);
     }
-    #modal_export h3 { margin:0 0 10px 0; }
+    #modal_edit .modal-inner { width:720px; }
+    #modal_edit h3 { margin:0 0 12px 0; }
+    #modal_edit .form-grid {
+        display:grid;
+        grid-template-columns: 1fr 1fr;
+        gap:12px 20px;
+    }
+    #modal_edit .form-grid label {
+        display:block;
+        font-size:13px;
+        color:var(--muted);
+        margin-bottom:4px;
+    }
+    #modal_edit .form-grid input,
+    #modal_edit .form-grid select,
+    #modal_edit .form-grid textarea {
+        width:100%;
+        box-sizing:border-box;
+        padding:8px 10px;
+        background:var(--input-bg);
+        border:1px solid var(--border);
+        color:#eaeaea;
+        border-radius:6px;
+        outline:none;
+        font-size:14px;
+    }
+    #modal_edit .full-width {
+        grid-column: span 2;
+    }
+    #modal_edit .actions {
+        display:flex;
+        justify-content:flex-end;
+        gap:10px;
+        margin-top:20px;
+    }
 
-    /* grid de filtros: checkbox (esq) | controle (dir) */
+    /* Export Modal */
     #modal_export .export-grid {
         display:grid;
         grid-template-columns: 220px 1fr;
@@ -1300,38 +1907,27 @@ def gerar_pagina_lista(registros):
     }
     #modal_export .export-left { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:14px; }
     #modal_export .export-left input[type="checkbox"] { width:16px; height:16px; }
-    /* usar mesmo estilo dos inputs do formulário */
     #modal_export .export-right input[type="text"],
     #modal_export .export-right select {
         width:100%;
         box-sizing:border-box;
         padding:8px 10px;
-        margin-top:0;
         background:var(--input-bg);
         border:1px solid var(--border);
-        color: #eaeaea;
+        color:#eaeaea;
         border-radius:8px;
         outline:none;
         font-size:14px;
-        -webkit-appearance: none;
-        appearance: none;
     }
-    /* força opções com tema escuro (alguns navegadores usam default claro) */
     #modal_export .export-right select option {
-        color: #eaeaea;
-        background: #1b1b1b;
+        color:#eaeaea;
+        background:#1b1b1b;
     }
     #modal_export .export-right .two-inline { display:flex; gap:8px; }
-    #modal_export .export-right .two-inline input { flex:1; }
-
-    /* responsivo: empilha em telas pequenas */
     @media (max-width:640px) {
-        #modal_export .export-grid {
-            grid-template-columns: 1fr;
-        }
+        #modal_export .export-grid { grid-template-columns: 1fr; }
         #modal_export .export-left { padding:8px 0; }
     }
-
 </style>
 </head>
 <body>
@@ -1343,7 +1939,6 @@ def gerar_pagina_lista(registros):
         </div>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <input id="search" class="search" placeholder="Pesquisar (responsável, patrimônio, hardware, modelo...)">
-            <!-- Seletor de visão adicionado aqui -->
             <select id="view_selector" title="Selecionar vista">
                 <option value="ativos" selected>Listar: Ativos</option>
                 <option value="inativos">Listar: Inativos</option>
@@ -1353,7 +1948,6 @@ def gerar_pagina_lista(registros):
                 <option value="tudo">Listar: Tudo</option>
             </select>
             <button id="btnToggleOrder" class="btn ghost" type="button" title="Alternar ordem por ID">Ordem: Mais novo → antigo</button>
-            <!-- Agora abre modal com filtros -->
             <button id="btnExportCsv" class="btn" type="button">Exportar CSV</button>
             <a class="btn ghost" href="/">Voltar</a>
         </div>
@@ -1369,14 +1963,14 @@ def gerar_pagina_lista(registros):
             <col style="width:5%;">   <!-- Origem -->
             <col style="width:5%;">   <!-- Patrimônio -->
             <col style="width:5%;">   <!-- Workflow -->
-            <col style="width:6%;">   <!-- Motivo (reduzido ~40%) -->
-            <col style="width:7%;">   <!-- Hardware -->
-            <col style="width:3.5%;"> <!-- Marca (reduzido pela metade) -->
+            <col style="width:6%;">   <!-- Motivo -->
+            <col style="width:6%;">   <!-- Hardware -->
+            <col style="width:3.5%;"> <!-- Marca -->
             <col style="width:8%;">   <!-- Modelo -->
             <col style="width:5%;">   <!-- Data início -->
             <col style="width:5%;">   <!-- Data retorno -->
             <col style="width:5%;">   <!-- Status -->
-            <col style="width:8%;">   <!-- Ação -->
+            <col style="width:9%;">   <!-- Ação -->
         </colgroup>
         <thead>
             <tr>
@@ -1404,7 +1998,109 @@ def gerar_pagina_lista(registros):
     </div>
 </div>
 
-<!-- Modal de Export CSV (reorganizado em grid: checkbox left | control right) -->
+<!-- MODAL DE EDIÇÃO (com campos de seleção e suporte a "outros") -->
+<div id="modal_edit">
+  <div class="modal-inner">
+    <h3>Editar registro <span id="edit_id_display"></span></h3>
+    <form method="POST" action="/editar_registro" id="editForm">
+      <input type="hidden" name="id" id="edit_id">
+      <div class="form-grid">
+        <!-- Tipo -->
+        <div>
+          <label>Tipo</label>
+          <select name="tipo" id="edit_tipo" required>
+            <option value="entrada">Entrada</option>
+            <option value="saida">Saída</option>
+            <option value="emprestimo">Empréstimo</option>
+          </select>
+        </div>
+        <!-- Responsável (select com a lista fixa) -->
+        <div>
+          <label>Responsável</label>
+          <select name="responsavel" id="edit_responsavel" required>
+            <option value="" disabled selected>Selecione o responsável...</option>
+            """ + responsaveis_options + """
+          </select>
+        </div>
+        <!-- Patrimônio -->
+        <div>
+          <label>Patrimônio</label>
+          <input type="text" name="patrimonio" id="edit_patrimonio">
+        </div>
+        <!-- Workflow -->
+        <div>
+          <label>Workflow</label>
+          <input type="text" name="workflow" id="edit_workflow">
+        </div>
+        <!-- Origem -->
+        <div>
+          <label>Origem</label>
+          <input type="text" name="origem" id="edit_origem" maxlength="10">
+        </div>
+        <!-- Motivo: select + campo extra para "outros" -->
+        <div style="grid-column: span 2;">
+          <label>Motivo</label>
+          <select name="motivo" id="edit_motivo_select" required>
+            <option value="formatação">Formatação</option>
+            <option value="manutenção">Manutenção</option>
+            <option value="reparo">Reparo</option>
+            <option value="outros">Outros</option>
+          </select>
+          <div id="edit_motivo_outros_div" style="display:none; margin-top:8px;">
+            <label>Descreva o motivo</label>
+            <textarea name="motivo_outros" id="edit_motivo_outros"></textarea>
+          </div>
+        </div>
+        <!-- Hardware: select + campo extra para "outros" -->
+        <div style="grid-column: span 2;">
+          <label>Hardware</label>
+          <select name="hardware" id="edit_hardware_select" required>
+            <option value="Desktop">Desktop</option>
+            <option value="Notebook">Notebook</option>
+            <option value="Teclado/Mouse">Teclado/Mouse</option>
+            <option value="Monitor">Monitor</option>
+            <option value="outros">Outros</option>
+          </select>
+          <div id="edit_hardware_outros_div" style="display:none; margin-top:8px;">
+            <label>Descreva o hardware</label>
+            <textarea name="hardware_outros" id="edit_hardware_outros"></textarea>
+          </div>
+        </div>
+        <!-- Marca -->
+        <div>
+          <label>Marca</label>
+          <input type="text" name="marca" id="edit_marca" required>
+        </div>
+        <!-- Modelo -->
+        <div>
+          <label>Modelo</label>
+          <input type="text" name="modelo" id="edit_modelo" required>
+        </div>
+        <!-- Emprestado para -->
+        <div>
+          <label>Emprestado para</label>
+          <input type="text" name="emprestado_para" id="edit_emprestado_para">
+        </div>
+        <!-- Data da movimentação -->
+        <div>
+          <label>Data da movimentação</label>
+          <input type="text" name="data_inicio" id="edit_data_inicio" placeholder="DD/MM/AAAA HH:mm" required>
+        </div>
+        <!-- Data prevista de devolução -->
+        <div>
+          <label>Data prevista de devolução</label>
+          <input type="text" name="data_retorno" id="edit_data_retorno" placeholder="DD/MM/AAAA HH:mm">
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn ghost" onclick="fecharEditar()">Cancelar</button>
+        <button type="submit" class="btn">Salvar alterações</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- MODAL EXPORT -->
 <div id="modal_export">
   <div class="modal-inner">
     <h3>Exportar CSV — Filtros</h3>
@@ -1412,10 +2108,8 @@ def gerar_pagina_lista(registros):
       <div class="export-grid">
         <div class="export-left"><label><input type="checkbox" name="f_all" id="f_all"> <span>Todos (exporta tudo)</span></label></div>
         <div class="export-right"><div class="note">Selecionar para exportar todos os registros</div></div>
-
         <div class="export-left"><label><input type="checkbox" name="f_manual" id="f_manual"> <span>Manual (exporta o que estou vendo)</span></label></div>
         <div class="export-right"><div class="note">Exporta apenas os IDs visíveis na tabela</div></div>
-
         <div class="export-left"><label><input type="checkbox" name="f_tipo" id="f_tipo"> <span>Tipo</span></label></div>
         <div class="export-right">
           <select name="tipo_value" id="tipo_value">
@@ -1425,27 +2119,21 @@ def gerar_pagina_lista(registros):
             <option value="emprestimo">Empréstimo</option>
           </select>
         </div>
-
         <div class="export-left"><label><input type="checkbox" name="f_responsavel" id="f_responsavel"> <span>Responsável</span></label></div>
         <div class="export-right">
           <select name="responsavel_value" id="responsavel_value">
             <option value="">-- selecione --</option>
-""" + responsaveis_html + """
+""" + responsaveis_options + """
           </select>
         </div>
-
         <div class="export-left"><label><input type="checkbox" name="f_emprestado_para" id="f_emprestado_para"> <span>Emprestado para</span></label></div>
         <div class="export-right"><input type="text" name="emprestado_para_value" id="emprestado_para_value" placeholder="Texto a buscar"></div>
-
         <div class="export-left"><label><input type="checkbox" name="f_origem" id="f_origem"> <span>Origem</span></label></div>
         <div class="export-right"><input type="text" name="origem_value" id="origem_value" placeholder="Ex.: CPCTBA" maxlength="10"></div>
-
         <div class="export-left"><label><input type="checkbox" name="f_patrimonio" id="f_patrimonio"> <span>Patrimônio</span></label></div>
         <div class="export-right"><input type="text" name="patrimonio_value" id="patrimonio_value" placeholder="Ex.: 1234567"></div>
-
         <div class="export-left"><label><input type="checkbox" name="f_workflow" id="f_workflow"> <span>Workflow</span></label></div>
         <div class="export-right"><input type="text" name="workflow_value" id="workflow_value" placeholder="Ex.: P-1234567"></div>
-
         <div class="export-left"><label><input type="checkbox" name="f_motivo" id="f_motivo"> <span>Motivo</span></label></div>
         <div class="export-right">
           <select name="motivo_value" id="motivo_value">
@@ -1456,7 +2144,6 @@ def gerar_pagina_lista(registros):
             <option value="outros">Outros</option>
           </select>
         </div>
-
         <div class="export-left"><label><input type="checkbox" name="f_hardware" id="f_hardware"> <span>Hardware</span></label></div>
         <div class="export-right">
           <select name="hardware_value" id="hardware_value">
@@ -1468,13 +2155,10 @@ def gerar_pagina_lista(registros):
             <option value="outros">Outros</option>
           </select>
         </div>
-
         <div class="export-left"><label><input type="checkbox" name="f_marca" id="f_marca"> <span>Marca</span></label></div>
         <div class="export-right"><input type="text" name="marca_value" id="marca_value" placeholder="Ex.: Dell"></div>
-
         <div class="export-left"><label><input type="checkbox" name="f_modelo" id="f_modelo"> <span>Modelo</span></label></div>
         <div class="export-right"><input type="text" name="modelo_value" id="modelo_value" placeholder="Ex.: OptiPlex"></div>
-
         <div class="export-left"><label><input type="checkbox" name="f_data" id="f_data"> <span>Data (intervalo)</span></label></div>
         <div class="export-right">
           <div class="two-inline">
@@ -1482,13 +2166,9 @@ def gerar_pagina_lista(registros):
             <input type="text" name="date_to" id="date_to" placeholder="Até (DD/MM/AAAA HH:mm)">
           </div>
         </div>
-
-        <!-- campo oculto que receberá os ids quando Manual for usado -->
         <div class="export-left"></div>
         <div class="export-right"><input type="hidden" name="manual_ids" id="manual_ids" value=""></div>
-
       </div>
-
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
         <button type="submit" class="btn">Exportar</button>
         <button type="button" class="btn ghost" id="btnCancelExport">Cancelar</button>
@@ -1497,8 +2177,8 @@ def gerar_pagina_lista(registros):
   </div>
 </div>
 
-<!-- Modals (lista) -->
-<div id="modal_extender" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;z-index:9999;">
+<!-- MODAL ESTENDER -->
+<div id="modal_extender">
   <div style="background:#1b1b1b;padding:20px;border-radius:10px;width:320px;box-shadow:0 6px 18px rgba(0,0,0,0.7);">
     <h3 style="margin:0 0 8px 0;">Estender Empréstimo</h3>
     <form method="POST" action="/estender" id="form_extender_lista">
@@ -1513,16 +2193,14 @@ def gerar_pagina_lista(registros):
   </div>
 </div>
 
-<div id="modal_obs" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;z-index:10000;">
+<!-- MODAL OBSERVAÇÕES -->
+<div id="modal_obs">
   <div style="background:#1b1b1b;padding:22px;border-radius:10px;width:650px;max-width:90vw;box-shadow:0 6px 18px rgba(0,0,0,0.7);">
     <h3 style="margin:0 0 8px 0;">Observações</h3>
     <div style="max-height:420px;overflow:auto;border:1px solid var(--border);padding:10px;border-radius:6px;background:#0f0f0f;color:#e6e6e6;">
       <table id="obs_table" style="width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;">
-        <colgroup>
-            <col style="width:130px;">
-            <col style="width:auto;">
-        </colgroup>
-        <thead><tr><th style="text-align:left;padding:6px;border-bottom:1px solid #222;width:110px;">Data</th><th style="text-align:left;padding:6px;border-bottom:1px solid #222;">Observação</th></tr></thead>
+        <colgroup><col style="width:130px;"><col style="width:auto;"></colgroup>
+        <thead><tr><th style="text-align:left;padding:6px;border-bottom:1px solid #222;">Data</th><th style="text-align:left;padding:6px;border-bottom:1px solid #222;">Observação</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -1542,174 +2220,142 @@ def gerar_pagina_lista(registros):
 <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 <script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/pt.js"></script>
 <script>
-    // Atualização automática do painel de pendências (a cada 20s)
-    const ATUALIZA_INTERVAL_MS = 20000;
-    async function atualizarAtrasos() {
-        try {
-            const res = await fetch('/atrasos');
-            if (!res.ok) return;
-            const html = await res.text();
-            const el = document.getElementById('mini_pendencias');
-            if (el) el.innerHTML = html;
-        } catch (e) {
-            console.error('Erro atualizando pendências:', e);
-        }
-    }
-    setInterval(atualizarAtrasos, ATUALIZA_INTERVAL_MS);
-
+    // ------------------- FLATPICKR ---------------------
     function initFlatpickrBR(selector) {
         flatpickr(selector, {
             enableTime: true,
             time_24hr: true,
             dateFormat: "d/m/Y H:i",
             locale: "pt",
-            theme: "light",  // Força tema claro
-            // Desabilita a detecção automática de tema escuro
-            onReady: function(selectedDates, dateStr, instance) {
-                // Remove qualquer classe de tema escuro que possa ter sido adicionada
-                instance.calendarContainer.classList.remove("flatpickr-dark");
-                instance.calendarContainer.classList.add("flatpickr-light");
-            }
+            theme: "light"
         });
     }
 
-    document.addEventListener('DOMContentLoaded', function() {
-        try {
-            function pad(n){ return n.toString().padStart(2, '0'); }
-            function formatBRDate(d){
-                return pad(d.getDate()) + '/' + pad(d.getMonth()+1) + '/' + d.getFullYear()
-                    + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-            }
-            document.getElementById("data_inicio").value = formatBRDate(new Date());
-        } catch (e) {
-            console.error('Erro ao setar data_inicio:', e);
+    // --------------- FUNÇÕES DE TOGGLE "OUTROS" ---------------
+    function toggleEditMotivoOutros() {
+        const select = document.getElementById('edit_motivo_select');
+        const div = document.getElementById('edit_motivo_outros_div');
+        const textarea = document.getElementById('edit_motivo_outros');
+        if (select && select.value === 'outros') {
+            div.style.display = 'block';
+            textarea.required = true;
+        } else if (select) {
+            div.style.display = 'none';
+            textarea.required = false;
         }
-        // preencher registrado_em com data do cliente antes de enviar formulários
-        try {
-            var mainForm = document.getElementById('mainForm');
-            if (mainForm) {
-                mainForm.addEventListener('submit', function(){
-                    try { document.getElementById('registrado_em_main').value = formatBRDate(new Date()); } catch(e){}
-                });
-            }
-        } catch(e){}
+    }
 
-        try {
-            var formObs = document.getElementById('form_add_obs');
-            if (formObs) {
-                formObs.addEventListener('submit', function(){
-                    try { document.getElementById('registrado_em_obs').value = formatBRDate(new Date()); } catch(e){}
-                });
-            }
-        } catch(e){}
+    function toggleEditHardwareOutros() {
+        const select = document.getElementById('edit_hardware_select');
+        const div = document.getElementById('edit_hardware_outros_div');
+        const textarea = document.getElementById('edit_hardware_outros');
+        if (select && select.value === 'outros') {
+            div.style.display = 'block';
+            textarea.required = true;
+        } else if (select) {
+            div.style.display = 'none';
+            textarea.required = false;
+        }
+    }
 
+    // --------------- FUNÇÃO AUXILIAR PARA SELECT ---------------
+    function setSelectValue(select, value) {
+        if (!select) return;
+        for (let i = 0; i < select.options.length; i++) {
+            if (select.options[i].value.toLowerCase() === value.toLowerCase()) {
+                select.selectedIndex = i;
+                break;
+            }
+        }
+    }
+
+    // ------------------- MODAL EDIÇÃO -------------------
+    window.abrirEditar = function(id, record) {
         try {
-            function detectClientUser() {
-                try {
-                    if (window.ActiveXObject || "ActiveXObject" in window) {
-                        var net = new ActiveXObject("WScript.Network");
-                        return net.UserName || "";
+            const modal = document.getElementById("modal_edit");
+            if (!modal) return;
+            document.getElementById("edit_id").value = id;
+            document.getElementById("edit_id_display").innerText = "#" + id;
+
+            // Preencher campos
+            // Tipo
+            setSelectValue(document.getElementById("edit_tipo"), record.tipo || "");
+            // Responsável
+            setSelectValue(document.getElementById("edit_responsavel"), record.responsavel || "");
+            // Campos de texto
+            document.getElementById("edit_patrimonio").value = record.patrimonio || "";
+            document.getElementById("edit_workflow").value = record.workflow || "";
+            document.getElementById("edit_origem").value = record.origem || "";
+            document.getElementById("edit_marca").value = record.marca || "";
+            document.getElementById("edit_modelo").value = record.modelo || "";
+            document.getElementById("edit_emprestado_para").value = record.emprestado_para || "";
+            document.getElementById("edit_data_inicio").value = record.data_inicio || "";
+            document.getElementById("edit_data_retorno").value = record.data_retorno || "";
+
+            // ----- Motivo -----
+            const motivoSelect = document.getElementById("edit_motivo_select");
+            const motivoOutrosDiv = document.getElementById("edit_motivo_outros_div");
+            const motivoOutros = document.getElementById("edit_motivo_outros");
+            const motivoAtual = record.motivo || "";
+            const opcoesMotivo = ["formatação", "manutenção", "reparo"];
+            if (opcoesMotivo.includes(motivoAtual.toLowerCase())) {
+                setSelectValue(motivoSelect, motivoAtual);
+                motivoOutrosDiv.style.display = "none";
+                motivoOutros.required = false;
+                motivoOutros.value = "";
+            } else {
+                setSelectValue(motivoSelect, "outros");
+                motivoOutros.value = motivoAtual;
+                motivoOutrosDiv.style.display = "block";
+                motivoOutros.required = true;
+            }
+
+            // ----- Hardware -----
+            const hardwareSelect = document.getElementById("edit_hardware_select");
+            const hardwareOutrosDiv = document.getElementById("edit_hardware_outros_div");
+            const hardwareOutros = document.getElementById("edit_hardware_outros");
+            const hardwareAtual = record.hardware || "";
+            const opcoesHardware = ["Desktop", "Notebook", "Teclado/Mouse", "Monitor"];
+            if (opcoesHardware.includes(hardwareAtual)) {
+                setSelectValue(hardwareSelect, hardwareAtual);
+                hardwareOutrosDiv.style.display = "none";
+                hardwareOutros.required = false;
+                hardwareOutros.value = "";
+            } else {
+                setSelectValue(hardwareSelect, "outros");
+                hardwareOutros.value = hardwareAtual;
+                hardwareOutrosDiv.style.display = "block";
+                hardwareOutros.required = true;
+            }
+
+            // ----- Datas (flatpickr) -----
+            try {
+                if (window.flatpickr) {
+                    if (!document.querySelector("#edit_data_inicio")._flatpickr) {
+                        flatpickr("#edit_data_inicio", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
                     }
-                } catch(e) {}
-                return "";
-            }
-            var cu = detectClientUser();
-            var el = document.getElementById("client_user");
-            if (el) el.value = cu;
-        } catch(e) { console.warn("detecção usuário cliente falhou:", e); }
+                    if (!document.querySelector("#edit_data_retorno")._flatpickr) {
+                        flatpickr("#edit_data_retorno", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
+                    }
+                    document.querySelector("#edit_data_inicio")._flatpickr.setDate(record.data_inicio || null, true);
+                    document.querySelector("#edit_data_retorno")._flatpickr.setDate(record.data_retorno || null, true);
+                }
+            } catch(e) { console.warn("flatpickr edit:", e); }
 
-        initFlatpickrBR("#data_inicio");
-        initFlatpickrBR("#data_retorno");
-        initFlatpickrBR("#extender_data");
-
-        atualizarAtrasos();
-
-        try {
-            toggleOutroMotivo();
-            toggleOutroHardware();
-            toggleEmprestimoCampos();
-        } catch (e) {}
-    });
-
-    function toggleOutroMotivo() {
-        const show = document.getElementById("motivo_select").value === "outros";
-        document.getElementById("motivo_outros_div").style.display = show ? "block" : "none";
-        if (show) document.getElementById("motivo_outros").required = true;
-        else document.getElementById("motivo_outros").required = false;
-    }
-
-    function toggleOutroHardware() {
-        const show = document.getElementById("hardware_select").value === "outros";
-        document.getElementById("hardware_outros_div").style.display = show ? "block" : "none";
-        if (show) document.getElementById("hardware_outros").required = true;
-        else document.getElementById("hardware_outros").required = false;
-    }
-
-    function toggleEmprestimoCampos() {
-        const tipo = document.getElementById("tipo").value;
-        const area = document.getElementById("area_emprestimo");
-        if (tipo === "emprestimo") {
-            area.style.display = "block";
-            document.getElementById("emprestado_para").required = true;
-            document.getElementById("data_retorno").required = true;
-        } else {
-            area.style.display = "none";
-            document.getElementById("emprestado_para").required = false;
-            document.getElementById("data_retorno").required = false;
+            modal.style.display = "flex";
+        } catch(e) {
+            console.error("Erro ao abrir editar:", e);
         }
-    }
+    };
 
-    function validarFormulario() {
-        const patr = document.getElementById("patrimonio").value.trim();
-        const hardware = document.getElementById("hardware_select").value;
-        
-        // Se não for Teclado/Mouse e o patrimônio foi preenchido, valida
-        if (hardware !== "Teclado/Mouse" && patr !== "") {
-            if (!/^[0-9]{7,}$/.test(patr)) {
-                alert("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos.");
-                return false;
-            }
-        }
-        // Se for Teclado/Mouse, o patrimônio é opcional, mas se preenchido deve ser válido
-        else if (hardware === "Teclado/Mouse" && patr !== "") {
-            if (!/^[0-9]{7,}$/.test(patr)) {
-                alert("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos, ou deixe em branco para Teclado/Mouse.");
-                return false;
-            }
-        }
+    window.fecharEditar = function() {
+        const modal = document.getElementById("modal_edit");
+        if (modal) modal.style.display = "none";
+    };
 
-        const workflow = document.getElementById("workflow").value.trim();
-        if (workflow) {
-            if (!/^(?:P-\\d{7}|P-\\d{5}-\\d{2})$/i.test(workflow)) {
-                alert("Workflow inválido. Formatos aceitos: P-1234567 ou P-12345-00.");
-                return false;
-            }
-        }
-
-        const origem = document.getElementById("origem").value.trim();
-        if (origem && origem.length > 10) {
-            alert("Origem deve ter no máximo 10 caracteres.");
-            return false;
-        }
-
-        return true;
-    }
-
-    function limparFormulario() {
-        document.getElementById("mainForm").reset();
-        try {
-            document.querySelectorAll('.flatpickr-input').forEach(i => i.value = "");
-        } catch (e) {}
-    }
-
-    function abrirExtensao(id, current_date_br = "") {
-        document.getElementById("extender_id").value = id;
-        document.getElementById("extender_data").value = current_date_br || "";
-        document.getElementById("modal_extender").style.display = "flex";
-    }
-    function fecharExtensao() {
-        document.getElementById("modal_extender").style.display = "none";
-    }
+    // ------------------- OUTRAS FUNÇÕES -----------------
+    function fecharExtensao() { document.getElementById("modal_extender").style.display = "none"; }
+    function fecharObs() { document.getElementById("modal_obs").style.display = "none"; }
 
     function abrirObs(id, obs_json){
         try{
@@ -1718,69 +2364,102 @@ def gerar_pagina_lista(registros):
                 try { list = JSON.parse(obs_json); } catch (e) { list = []; }
             } else if (Array.isArray(obs_json)) {
                 list = obs_json;
-            } else if (obs_json && typeof obs_json === 'object') {
-                if (Array.isArray(obs_json)) list = obs_json;
-                else list = [];
             }
             var tbody = document.querySelector('#obs_table tbody');
             tbody.innerHTML = '';
             if (!list || list.length === 0){
-                var tr = document.createElement('tr');
-                tr.innerHTML = '<td style="padding:6px;border-bottom:1px solid #222;color:var(--muted);" colspan="2">Nenhuma observação registrada.</td>';
-                tbody.appendChild(tr);
+                tbody.innerHTML = '<tr><td colspan="2" style="padding:6px;color:var(--muted);">Nenhuma observação registrada.</td></tr>';
             } else {
                 list.forEach(function(o){
                     var date = o.registrado_em || '';
                     var text = o.text || '';
                     var tr = document.createElement('tr');
-                    tr.innerHTML = "<td style='padding:6px;border-bottom:1px solid #222;vertical-align:top;white-space:nowrap;color:var(--muted);'>"+ date +"</td>" +
-                                   "<td style='padding:6px;border-bottom:1px solid #222;white-space:pre-wrap;'>"+ (text || '') +"</td>";
+                    tr.innerHTML = "<td style='padding:6px;vertical-align:top;white-space:nowrap;color:var(--muted);'>"+ date +"</td>" +
+                                   "<td style='padding:6px;white-space:pre-wrap;'>"+ text +"</td>";
                     tbody.appendChild(tr);
                 });
             }
-            try{ document.getElementById('obs_record_id').value = id; }catch(e){}
-            try{ document.getElementById('obs_text').value = ''; }catch(e){}
+            document.getElementById('obs_record_id').value = id;
+            document.getElementById('obs_text').value = '';
             document.getElementById('modal_obs').style.display = 'flex';
         }catch(e){ console.error('abrirObs erro', e); }
     }
-    function fecharObs(){ try{ document.getElementById('modal_obs').style.display = 'none'; }catch(e){} }
 
-    document.addEventListener("DOMContentLoaded", function() {
+    function abrirExtensao(id, current_date_br = "") {
+        document.getElementById("extender_id").value = id;
+        document.getElementById("extender_data").value = current_date_br || "";
+        document.getElementById("modal_extender").style.display = "flex";
+    }
+
+    // --------------- Event delegation: abrir modal editar ---------------
+    document.addEventListener('click', function(e) {
+        try {
+            const btn = e.target.closest && e.target.closest('.btn-edit');
+            if (!btn) return;
+            let recJson = btn.getAttribute('data-record');
+            if (!recJson) return;
+            recJson = recJson.replace(/&quot;/g, '"');
+            const rec = JSON.parse(recJson);
+            if (window.abrirEditar) {
+                abrirEditar(rec.id, rec);
+            }
+        } catch (err) {
+            console.error('erro ao abrir modal editar:', err);
+        }
     });
-</script>
 
-<script>
-    // filtro cliente + ordenação por ID (mais novo <-> mais antigo)
+    // Adicionar listeners para os selects de "outros" quando o modal é aberto
+    document.addEventListener('click', function(e) {
+        const btn = e.target.closest && e.target.closest('.btn-edit');
+        if (btn) {
+            // Pequeno timeout para garantir que o modal já foi preenchido
+            setTimeout(function() {
+                const motivoSelect = document.getElementById('edit_motivo_select');
+                const hardwareSelect = document.getElementById('edit_hardware_select');
+                if (motivoSelect) {
+                    motivoSelect.removeEventListener('change', toggleEditMotivoOutros);
+                    motivoSelect.addEventListener('change', toggleEditMotivoOutros);
+                }
+                if (hardwareSelect) {
+                    hardwareSelect.removeEventListener('change', toggleEditHardwareOutros);
+                    hardwareSelect.addEventListener('change', toggleEditHardwareOutros);
+                }
+            }, 100);
+        }
+    });
+
+    // --------------- Confirmação restaurar ---------------
+    document.addEventListener('submit', function(e) {
+        try {
+            const form = e.target;
+            const action = form.getAttribute && form.getAttribute('action');
+            if (action === '/restaurar') {
+                if (!confirm('Confirma restaurar este registro?')) e.preventDefault();
+            }
+        } catch(err) { console.error(err); }
+    });
+
+    // --------------- FILTRO E ORDENAÇÃO ---------------
     function updateVisibility() {
         const q = document.getElementById("search").value.toLowerCase();
         const view = document.getElementById("view_selector").value;
         const rows = document.querySelectorAll("#tabela tbody tr");
         rows.forEach(r => {
-            // base: cada row decide se cumpre a view
             const devolvido = r.getAttribute('data-devolvido') === 'true';
             const estoque = r.getAttribute('data-estoque') === 'true';
             const oculto = r.getAttribute('data-oculto') === 'true';
             const pendencia = r.getAttribute('data-pendencia') === 'true';
 
             let view_ok = false;
-            if (view === 'ativos') {
-                view_ok = (devolvido === false) && (oculto === false);
-            } else if (view === 'inativos') {
-                view_ok = (devolvido === true) || (estoque === true);
-            } else if (view === 'estoque') {
-                view_ok = (estoque === true);
-            } else if (view === 'pendentes') {
-                view_ok = (pendencia === true);
-            } else if (view === 'legado') {
-                view_ok = (oculto === false);
-            } else if (view === 'tudo') {
-                view_ok = true;
-            }
+            if (view === 'ativos') view_ok = !devolvido && !oculto;
+            else if (view === 'inativos') view_ok = devolvido || estoque;
+            else if (view === 'estoque') view_ok = estoque;
+            else if (view === 'pendentes') view_ok = pendencia;
+            else if (view === 'legado') view_ok = !oculto;
+            else if (view === 'tudo') view_ok = true;
 
-            // search filter: se a string não aparece no texto da linha, esconder
             const text = r.innerText.toLowerCase();
             const search_ok = q === "" || text.includes(q);
-
             r.style.display = (view_ok && search_ok) ? "" : "none";
         });
     }
@@ -1788,12 +2467,10 @@ def gerar_pagina_lista(registros):
     document.getElementById("search").addEventListener("input", updateVisibility);
     document.getElementById("view_selector").addEventListener("change", updateVisibility);
     document.addEventListener("DOMContentLoaded", function () {
-        const seletor = document.getElementById("view_selector");
-        if (seletor) {
-            seletor.dispatchEvent(new Event("change"));
-        }
+        document.getElementById("view_selector").dispatchEvent(new Event("change"));
     });
 
+    // Ordenação por ID
     (function(){
         const btn = document.getElementById("btnToggleOrder");
         let desc = true;
@@ -1801,8 +2478,8 @@ def gerar_pagina_lista(registros):
             const tbody = document.querySelector("#tabela tbody");
             const rows = Array.from(tbody.querySelectorAll("tr"));
             rows.sort((a,b) => {
-                const ida = parseInt(a.dataset.id||a.getAttribute('data-id')||0,10);
-                const idb = parseInt(b.dataset.id||b.getAttribute('data-id')||0,10);
+                const ida = parseInt(a.dataset.id||0,10);
+                const idb = parseInt(b.dataset.id||0,10);
                 return descending ? idb - ida : ida - idb;
             });
             rows.forEach(r => tbody.appendChild(r));
@@ -1815,72 +2492,31 @@ def gerar_pagina_lista(registros):
         try { sortTableById(true); } catch(e){}
     })();
 
-    // Export CSV modal logic (flatpickr date_to predefinido com hora atual do cliente)
+    // Export CSV
     (function(){
         const btnOpen = document.getElementById("btnExportCsv");
         const modal = document.getElementById("modal_export");
         const btnCancel = document.getElementById("btnCancelExport");
         const form = document.getElementById("form_export");
 
-        // inicializar flatpickr para todos os campos de data na página de lista
         try {
-            flatpickr("#date_from", {
-                enableTime: true,
-                time_24hr: true,
-                dateFormat: "d/m/Y H:i",
-                locale: "pt",
-                theme: "light"  // Força tema claro na página de lista também
-            });
-            flatpickr("#date_to", {
-                enableTime: true,
-                time_24hr: true,
-                dateFormat: "d/m/Y H:i",
-                locale: "pt",
-                theme: "light"  // Força tema claro na página de lista também
-            });
-            // Inicializar também para o campo de estender empréstimo
-            flatpickr("#extender_data", {
-                enableTime: true,
-                time_24hr: true,
-                dateFormat: "d/m/Y H:i",
-                locale: "pt",
-                theme: "light"  // Força tema claro na página de lista também
-            });
-        } catch(e) {
-            console.warn("Erro ao inicializar flatpickr:", e);
-        }
+            flatpickr("#date_from", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
+            flatpickr("#date_to", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
+            flatpickr("#extender_data", { enableTime:true, time_24hr:true, dateFormat:"d/m/Y H:i", locale:"pt", theme:"light" });
+        } catch(e) { console.warn("Erro flatpickr:", e); }
 
         btnOpen.addEventListener("click", function(){
             modal.style.display = "flex";
-            // reset manual ids hidden
             document.getElementById("manual_ids").value = "";
-
-            // definir a data final (date_to) com a hora atual do cliente por padrão
             try {
-                // Usa flatpickr para setar a data atual
                 const fp = document.querySelector("#date_to")._flatpickr;
-                if (fp && typeof fp.setDate === 'function') {
-                    fp.setDate(new Date(), true);
-                } else {
-                    // fallback: setar valor do input manualmente no mesmo formato usado no flatpickr
-                    function pad(n){ return n.toString().padStart(2,'0'); }
-                    const d = new Date();
-                    const s = pad(d.getDate()) + '/' + pad(d.getMonth()+1) + '/' + d.getFullYear() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-                    const el = document.getElementById("date_to");
-                    if (el) el.value = s;
-                }
-            } catch(e) {
-                console.warn("Não foi possível predefinir date_to:", e);
-            }
+                if (fp) fp.setDate(new Date(), true);
+            } catch(e) {}
         });
-        btnCancel.addEventListener("click", function(){
-            modal.style.display = "none";
-        });
+        btnCancel.addEventListener("click", function(){ modal.style.display = "none"; });
 
-        // quando enviar, se Manual está marcado coletar os ids das linhas visíveis
         form.addEventListener("submit", function(ev){
-            const manualChecked = document.getElementById("f_manual").checked;
-            if (manualChecked) {
+            if (document.getElementById("f_manual").checked) {
                 const rows = document.querySelectorAll("#tabela tbody tr");
                 const ids = [];
                 rows.forEach(r => {
@@ -1891,36 +2527,127 @@ def gerar_pagina_lista(registros):
                 });
                 document.getElementById("manual_ids").value = ids.join(",");
             }
-            // se "Todos" estiver checado, não precisa fazer nada — o servidor terá f_all
-            // modal será fechado pelo navegador quando redirecionar p/ download
         });
     })();
 </script>
-
 </body>
 </html>
 """
-
     page = page.replace("{total}", str(len(registros)))
     return page
-
 
 # ----------------------------- SERVIDOR (HANDLERS) -----------------------------
 class Servidor(BaseHTTPRequestHandler):
 
     def do_GET(self):
-        # manter raw_path para poder ler a querystring quando necessário
         raw_path = self.path
         path = raw_path.split("?", 1)[0]
+
+        # rotas públicas: /login (get), /login (post handled in do_POST), e assets externos
+        if path == "/login":
+            users = load_users()
+            # se já logado -> redireciona para /
+            cur = self.get_current_user()
+            if cur:
+                self.redirect("/")
+                return
+            self.responder(gerar_login_page(users))
+            return
+
+        if path == "/logout":
+            # invalidar sessão se houver
+            token = self._get_cookie("session_token")
+            if token:
+                remove_session(token)
+            # limpar cookie e redirecionar para /login
+            self.send_response(303)
+            self.clear_session_cookie()
+            self.send_header("Location", "/login")
+            self.end_headers()
+            return
+
+        # proteger páginas principais: exigir login
+        cur_user = self.get_current_user()
+        if not cur_user:
+            # redirecionar para login
+            self.send_response(303)
+            self.send_header("Location", "/login")
+            self.end_headers()
+            return
+
+        # a partir daqui, o usuário está autenticado: pode acessar /
         if path == "/":
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
-            self.responder(gerar_html_form(registros))
+            # modificar gerar_html_form para aceitar current_user (veja abaixo)
+            self.responder(gerar_html_form(registros, cur_user))
+            return
+
+        # ---------- Admin actions (only admin allowed) ----------
+        if path == "/admin_add_user":
+            cur_user = self.get_current_user()
+            if not cur_user or str(cur_user).lower() != "admin":
+                return self.responder_error("Permissão negada.")
+            username = campos.get("username", [""])[0].strip()
+            if not username:
+                return self.responder_error("Nome de usuário inválido.")
+            users = load_users()
+            if find_user(users, username):
+                return self.responder_error("Usuário já existe.")
+            users.append({"username": username})
+            save_users(users)
+            # redirect back to main
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
+        if path == "/admin_reset_password":
+            cur_user = self.get_current_user()
+            if not cur_user or str(cur_user).lower() != "admin":
+                return self.responder_error("Permissão negada.")
+            target = campos.get("target_user", [""])[0].strip()
+            if not target:
+                return self.responder_error("Selecione um usuário.")
+            users = load_users()
+            u = find_user(users, target)
+            if not u:
+                return self.responder_error("Usuário inexistente.")
+
+            # Remover hash e salt para forçar que o usuário defina nova senha no próximo login
+            if "password_hash" in u: u.pop("password_hash", None)
+            if "salt" in u: u.pop("salt", None)
+
+            save_users(users)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
+        if path == "/admin_delete_user":
+            cur_user = self.get_current_user()
+            if not cur_user or str(cur_user).lower() != "admin":
+                return self.responder_error("Permissão negada.")
+            target = campos.get("target_user", [""])[0].strip()
+            if not target:
+                return self.responder_error("Selecione um usuário.")
+            if target.lower() == "admin":
+                return self.responder_error("Não é permitido excluir o usuário admin.")
+            users = load_users()
+            users = [x for x in users if x.get("username","").strip().lower() != target.lower()]
+            save_users(users)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
+        # ---------- User actions (all authenticated users allowed) ----------
 
         elif path == "/lista":
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
-            self.responder(gerar_pagina_lista(registros))
+            self.responder(gerar_pagina_lista(registros, cur_user))
+            return
 
         elif path == "/export_csv":
             # carregar registros e aplicar filtros vindos via querystring
@@ -2080,9 +2807,105 @@ class Servidor(BaseHTTPRequestHandler):
         tamanho = int(self.headers.get("Content-Length", 0))
         dados = self.rfile.read(tamanho).decode("utf-8")
         campos = parse_qs(dados)
+        path = self.path.split("?", 1)[0]
+
+        # permitir POST em /login sem autenticação (fluxo de login)
+        if path == "/login":
+            username = campos.get("username", [""])[0].strip()
+            password = campos.get("password", [""])[0]
+            remember = bool(campos.get("remember", [""])[0])
+
+            users = load_users()
+            user = find_user(users, username)
+            if not user:
+                # usuário não existe -> erro
+                return self.responder_error("Usuário inexistente.")
+
+            # primeiro login: sem password_hash definido => define a senha
+            if not user.get("password_hash"):
+                if not password or len(password) < 6:
+                    return self.responder_error("Defina uma senha com pelo menos 6 caracteres.")
+                salt_hex, hash_hex = hash_password(password)
+                user["salt"] = salt_hex
+                user["password_hash"] = hash_hex
+                save_users(users)
+                token = create_session(username)
+                self.send_response(303)
+                self.set_session_cookie(token, remember=remember)
+                self.send_header("Location", "/")
+                self.end_headers()
+                return
+
+            # valida senha existente
+            if verify_password(password, user.get("salt",""), user.get("password_hash","")):
+                token = create_session(username)
+                self.send_response(303)
+                self.set_session_cookie(token, remember=remember)
+                self.send_header("Location", "/")
+                self.end_headers()
+                return
+            else:
+                return self.responder_error("Senha incorreta.")
 
         path = self.path
-        if path == "/registrar":
+
+        # ---------- Admin actions (only admin allowed) ----------
+        if path == "/admin_add_user":
+            cur_user = self.get_current_user()
+            if not cur_user or str(cur_user).lower() != "admin":
+                return self.responder_error("Permissão negada.")
+            username = campos.get("username", [""])[0].strip()
+            if not username:
+                return self.responder_error("Nome de usuário inválido.")
+            users = load_users()
+            if find_user(users, username):
+                return self.responder_error("Usuário já existe.")
+            users.append({"username": username})
+            save_users(users)
+            # redirect back to main
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
+        elif path == "/admin_reset_password":
+            cur_user = self.get_current_user()
+            if not cur_user or str(cur_user).lower() != "admin":
+                return self.responder_error("Permissão negada.")
+            target = campos.get("target_user", [""])[0].strip()
+            if not target:
+                return self.responder_error("Selecione um usuário.")
+            users = load_users()
+            u = find_user(users, target)
+            if not u:
+                return self.responder_error("Usuário inexistente.")
+            # Remover hash e salt para forçar que o usuário defina nova senha no próximo login
+            if "password_hash" in u: u.pop("password_hash", None)
+            if "salt" in u: u.pop("salt", None)
+            save_users(users)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
+        if path == "/admin_delete_user":
+            cur_user = self.get_current_user()
+            if not cur_user or str(cur_user).lower() != "admin":
+                return self.responder_error("Permissão negada.")
+            target = campos.get("target_user", [""])[0].strip()
+            if not target:
+                return self.responder_error("Selecione um usuário.")
+            if target.lower() == "admin":
+                return self.responder_error("Não é permitido excluir o usuário admin.")
+            users = load_users()
+            users = [x for x in users if x.get("username","").strip().lower() != target.lower()]
+            save_users(users)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
+        elif path == "/registrar":
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
 
@@ -2159,23 +2982,26 @@ class Servidor(BaseHTTPRequestHandler):
                 "observacoes": ([{
                     "text": observacao,
                     "registrado_em": (normalize_br_datetime_str(campos.get("registrado_em", [""])[0]) 
-                                      or sp_now_str())
+                                    or sp_now_str())
                 }] if observacao else [])
-             }
+            }
 
             if tipo == "emprestimo":
                 novo["emprestado_para"] = campos.get("emprestado_para", [""])[0]
                 novo["data_retorno"] = normalize_br_datetime_str(campos.get("data_retorno", [""])[0])
 
+            # --- Salva metadados do registro (IP + usuário) ---
             try:
                 client_ip = self.client_address[0] if hasattr(self, "client_address") else ""
             except:
                 client_ip = ""
-            if client_ip:
-                novo["oculto_meta"] = {
-                    "client_ip": client_ip,
-                    "registrado_em": sp_now_str()
-                }
+
+            current_user = self.get_current_user()  # obtém usuário logado
+            novo["oculto_meta"] = {
+                "client_ip": client_ip,
+                "registrado_em": sp_now_str(),
+                "registrado_por": current_user if current_user else ""
+            }
 
             registros.append(novo)
 
@@ -2235,7 +3061,6 @@ class Servidor(BaseHTTPRequestHandler):
                     pass
             novo_id = maxid + 1
 
-            # copiar campos do original
             novo = {
                 "id": novo_id,
                 "tipo": "saida" if tipo_orig == "entrada" else "entrada",
@@ -2243,7 +3068,6 @@ class Servidor(BaseHTTPRequestHandler):
                 "patrimonio": original.get("patrimonio", ""),
                 "workflow": original.get("workflow", ""),
                 "origem": original.get("origem", ""),
-                # data_inicio do novo registro = hora do clique
                 "data_inicio": now_str,
                 "motivo": original.get("motivo", ""),
                 "hardware": original.get("hardware", ""),
@@ -2251,6 +3075,14 @@ class Servidor(BaseHTTPRequestHandler):
                 "modelo": original.get("modelo", ""),
                 "devolvido": False,
                 "estoque": False
+            }
+
+            # --- Metadados com o usuário atual ---
+            current_user = self.get_current_user()
+            novo["oculto_meta"] = {
+                "client_ip": original.get("oculto_meta", {}).get("client_ip", ""),
+                "registrado_em": sp_now_str(),
+                "registrado_por": current_user if current_user else ""
             }
             # manter campos específicos de empréstimo se existirem (mas normalmente não)
             if original.get("emprestado_para"):
@@ -2328,6 +3160,193 @@ class Servidor(BaseHTTPRequestHandler):
 
             self.redirect("/lista")
 
+        elif path == "/restaurar":
+            cur_user = self.get_current_user()
+            if not cur_user or str(cur_user).lower() != "admin":
+                return self.responder_error("Permissão negada.")
+            try:
+                id_reg = int(campos.get("id", ["0"])[0])
+            except:
+                id_reg = 0
+            with open(ARQUIVO, "r", encoding="utf-8") as f:
+                registros = json.load(f)
+            updated = False
+            for r in registros:
+                try:
+                    if int(r.get("id", 0)) == id_reg:
+                        r["oculto"] = False
+                        updated = True
+                except:
+                    pass
+            if updated:
+                with open(ARQUIVO, "w", encoding="utf-8") as f:
+                    json.dump(registros, f, ensure_ascii=False, indent=4)
+            self.redirect("/lista")
+
+        elif path == "/editar_registro":
+            current_user = self.get_current_user()
+            if not current_user:
+                return self.responder_error("Usuário não autenticado.")
+
+            try:
+                id_reg = int(campos.get("id", ["0"])[0])
+            except:
+                return self.responder_error("ID inválido.")
+
+            with open(ARQUIVO, "r", encoding="utf-8") as f:
+                registros = json.load(f)
+
+            # localizar o registro
+            registro = None
+            for r in registros:
+                if int(r.get("id", 0)) == id_reg:
+                    registro = r
+                    break
+
+            if not registro:
+                return self.responder_error("Registro não encontrado.")
+
+            # ---------- VERIFICAÇÃO DE PERMISSÃO ----------
+            is_admin = (current_user and str(current_user).lower() == "admin")
+            is_owner = False
+            if not is_admin:
+                criador = registro.get("oculto_meta", {}).get("registrado_por")
+                if criador and str(criador).lower() == str(current_user).lower():
+                    # verifica prazo de 24h
+                    registrado_em_str = registro.get("oculto_meta", {}).get("registrado_em")
+                    if registrado_em_str:
+                        dt_registro = parse_br_datetime(registrado_em_str)
+                        if dt_registro:
+                            agora = sp_now_naive()
+                            diferenca = agora - dt_registro
+                            if diferenca.total_seconds() < 24 * 3600:
+                                # verifica se não há observações
+                                if not registro.get("observacoes"):
+                                    is_owner = True
+
+            if not (is_admin or is_owner):
+                return self.responder_error("Permissão negada.")
+
+            # ---------- FUNÇÕES AUXILIARES ----------
+            def get_str_value(key, default=""):
+                return campos.get(key, [default])[0].strip()
+
+            def get_bool_value(key):
+                return key in campos and campos[key][0].lower() in ("1", "true", "on", "yes")
+
+            # ---------- Dicionário para armazenar APENAS as alterações ----------
+            alteracoes = {}
+
+            # ----- 1. Tipo -----
+            new_tipo = get_str_value("tipo")
+            if new_tipo and new_tipo != registro.get("tipo"):
+                alteracoes["tipo"] = registro.get("tipo", "")
+                registro["tipo"] = new_tipo
+
+            # ----- 2. Responsável -----
+            new_responsavel = get_str_value("responsavel")
+            if new_responsavel and new_responsavel != registro.get("responsavel"):
+                alteracoes["responsavel"] = registro.get("responsavel", "")
+                registro["responsavel"] = new_responsavel
+
+            # ----- 3. Patrimônio -----
+            new_patrimonio = get_str_value("patrimonio")
+            if new_patrimonio != registro.get("patrimonio", ""):
+                alteracoes["patrimonio"] = registro.get("patrimonio", "")
+                registro["patrimonio"] = new_patrimonio
+
+            # ----- 4. Workflow -----
+            new_workflow = get_str_value("workflow")
+            if new_workflow != registro.get("workflow", ""):
+                alteracoes["workflow"] = registro.get("workflow", "")
+                registro["workflow"] = new_workflow
+
+            # ----- 5. Origem -----
+            new_origem = get_str_value("origem")
+            if new_origem != registro.get("origem", ""):
+                alteracoes["origem"] = registro.get("origem", "")
+                registro["origem"] = new_origem
+
+            # ----- 6. Motivo (com tratamento do "outros") -----
+            motivo_select = get_str_value("motivo")
+            if motivo_select == "outros":
+                new_motivo = get_str_value("motivo_outros")
+            else:
+                new_motivo = motivo_select
+            if new_motivo != registro.get("motivo", ""):
+                alteracoes["motivo"] = registro.get("motivo", "")
+                registro["motivo"] = new_motivo
+
+            # ----- 7. Hardware (com tratamento do "outros") -----
+            hardware_select = get_str_value("hardware")
+            if hardware_select == "outros":
+                new_hardware = get_str_value("hardware_outros")
+            else:
+                new_hardware = hardware_select
+            if new_hardware != registro.get("hardware", ""):
+                alteracoes["hardware"] = registro.get("hardware", "")
+                registro["hardware"] = new_hardware
+
+            # ----- 8. Marca -----
+            new_marca = get_str_value("marca")
+            if new_marca != registro.get("marca", ""):
+                alteracoes["marca"] = registro.get("marca", "")
+                registro["marca"] = new_marca
+
+            # ----- 9. Modelo -----
+            new_modelo = get_str_value("modelo")
+            if new_modelo != registro.get("modelo", ""):
+                alteracoes["modelo"] = registro.get("modelo", "")
+                registro["modelo"] = new_modelo
+
+            # ----- 10. Emprestado para -----
+            new_emprestado_para = get_str_value("emprestado_para")
+            if new_emprestado_para != registro.get("emprestado_para", ""):
+                alteracoes["emprestado_para"] = registro.get("emprestado_para", "")
+                registro["emprestado_para"] = new_emprestado_para
+
+            # ----- 11. Data início -----
+            new_data_inicio = normalize_br_datetime_str(get_str_value("data_inicio")) or ""
+            if new_data_inicio != registro.get("data_inicio", ""):
+                alteracoes["data_inicio"] = registro.get("data_inicio", "")
+                registro["data_inicio"] = new_data_inicio
+
+            # ----- 12. Data retorno -----
+            new_data_retorno = normalize_br_datetime_str(get_str_value("data_retorno")) or ""
+            if new_data_retorno != registro.get("data_retorno", ""):
+                alteracoes["data_retorno"] = registro.get("data_retorno", "")
+                registro["data_retorno"] = new_data_retorno
+
+            # ----- 13. Devolvido (booleano) -----
+            new_devolvido = get_bool_value("devolvido")
+            if new_devolvido != registro.get("devolvido", False):
+                alteracoes["devolvido"] = registro.get("devolvido", False)
+                registro["devolvido"] = new_devolvido
+
+            # ----- 14. Estoque (booleano) -----
+            new_estoque = get_bool_value("estoque")
+            if new_estoque != registro.get("estoque", False):
+                alteracoes["estoque"] = registro.get("estoque", False)
+                registro["estoque"] = new_estoque
+
+            # ---------- Se houver alterações, salva no histórico ----------
+            if alteracoes:
+                # Adiciona metadados da edição
+                alteracoes["registrado_em_snapshot"] = sp_now_str()
+                alteracoes["edited_by"] = str(current_user)
+
+                if "oculto_meta" not in registro or not isinstance(registro.get("oculto_meta"), dict):
+                    registro["oculto_meta"] = {}
+                if "edicoes" not in registro["oculto_meta"]:
+                    registro["oculto_meta"]["edicoes"] = []
+                registro["oculto_meta"]["edicoes"].append(alteracoes)
+
+                # Salva o arquivo
+                with open(ARQUIVO, "w", encoding="utf-8") as f:
+                    json.dump(registros, f, ensure_ascii=False, indent=4)
+
+            self.redirect("/lista")
+
         elif path == "/ocultar":
             id_reg = int(campos.get("id", ["0"])[0])
             with open(ARQUIVO, "r", encoding="utf-8") as f:
@@ -2378,13 +3397,13 @@ class Servidor(BaseHTTPRequestHandler):
             # preferir data enviada pelo cliente (registrado_em); fallback para server time
             reg_raw = campos.get("registrado_em", [""])[0].strip()
             reg_norm = normalize_br_datetime_str(reg_raw) or sp_now_str()
-#
+
             if not texto:
                 return self.responder_error("Observação vazia.")
-#
+
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
-#
+
             updated = False
             for r in registros:
                 try:
@@ -2409,6 +3428,39 @@ class Servidor(BaseHTTPRequestHandler):
 
         else:
             self.send_error(404, "Ação desconhecida")
+
+    # ---------------- authentication helpers (dentro de Servidor) ----------------
+    def _get_cookie(self, name):
+        cookie = self.headers.get("Cookie", "")
+        if not cookie:
+            return None
+        parts = cookie.split(";")
+        for p in parts:
+            if "=" in p:
+                k, v = p.strip().split("=", 1)
+                if k == name:
+                    return v
+        return None
+
+    def get_current_user(self):
+        token = self._get_cookie("session_token")
+        if not token:
+            return None
+        return validate_session(token)
+
+    def set_session_cookie(self, token, remember=False):
+        # set cookie: HttpOnly, Path=/
+        # if remember => Max-Age (persists); otherwise session cookie (no Max-Age)
+        cookie = f"session_token={token}; Path=/; HttpOnly"
+        if remember:
+            cookie += f"; Max-Age={SESSION_TTL}"
+        self.send_header("Set-Cookie", cookie)
+
+    def clear_session_cookie(self):
+        # expire cookie
+        cookie = "session_token=deleted; Path=/; HttpOnly; Max-Age=0"
+        self.send_header("Set-Cookie", cookie)
+
 
     # utilitários
     def responder(self, conteudo):
