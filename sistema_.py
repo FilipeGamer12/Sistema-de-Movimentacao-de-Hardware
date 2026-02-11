@@ -15,7 +15,7 @@ import time
 ARQUIVO = "dados.json"
 USERS_FILE = "users.json"
 SESSIONS_FILE = "sessions.json"
-SESSION_TTL = 4 * 3600  # 4 horas em segundos
+SESSION_TTL = 4 * 3600 # 4 horas em segundos
 PWD_ITERATIONS = 100_000
 PWD_SALT_BYTES = 16
 
@@ -624,7 +624,7 @@ def gerar_html_form(registros, current_user=None):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Controle de Hardware</title>
+<title>Controle de Hardware DEPPEN</title>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
 
@@ -1131,6 +1131,10 @@ def gerar_html_form(registros, current_user=None):
     async function atualizarAtrasos() {
         try {
             const res = await fetch('/atrasos');
+            if (res.status === 401) {
+                window.location.href = '/login';
+                return;
+            }
             if (!res.ok) return;
             const html = await res.text();
             const el = document.getElementById('mini_pendencias');
@@ -2543,10 +2547,9 @@ class Servidor(BaseHTTPRequestHandler):
         raw_path = self.path
         path = raw_path.split("?", 1)[0]
 
-        # rotas públicas: /login (get), /login (post handled in do_POST), e assets externos
+        # ---------- Rotas públicas ----------
         if path == "/login":
             users = load_users()
-            # se já logado -> redireciona para /
             cur = self.get_current_user()
             if cur:
                 self.redirect("/")
@@ -2555,106 +2558,38 @@ class Servidor(BaseHTTPRequestHandler):
             return
 
         if path == "/logout":
-            # invalidar sessão se houver
             token = self._get_cookie("session_token")
             if token:
                 remove_session(token)
-            # limpar cookie e redirecionar para /login
             self.send_response(303)
             self.clear_session_cookie()
             self.send_header("Location", "/login")
             self.end_headers()
             return
 
-        # proteger páginas principais: exigir login
-        cur_user = self.get_current_user()
-        if not cur_user:
-            # redirecionar para login
-            self.send_response(303)
-            self.send_header("Location", "/login")
-            self.end_headers()
-            return
-
-        # a partir daqui, o usuário está autenticado: pode acessar /
-        if path == "/":
+        # ---------- Rotas de API (retornam 401 se não autenticado) ----------
+        if path == "/atrasos":
+            usuario, ok = self._requer_autenticacao_api()
+            if not ok:
+                return
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
-            # modificar gerar_html_form para aceitar current_user (veja abaixo)
-            self.responder(gerar_html_form(registros, cur_user))
-            return
-
-        # ---------- Admin actions (only admin allowed) ----------
-        if path == "/admin_add_user":
-            cur_user = self.get_current_user()
-            if not cur_user or str(cur_user).lower() != "admin":
-                return self.responder_error("Permissão negada.")
-            username = campos.get("username", [""])[0].strip()
-            if not username:
-                return self.responder_error("Nome de usuário inválido.")
-            users = load_users()
-            if find_user(users, username):
-                return self.responder_error("Usuário já existe.")
-            users.append({"username": username})
-            save_users(users)
-            # redirect back to main
-            self.send_response(303)
-            self.send_header("Location", "/")
+            html = gerar_pendencias_html(registros)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
             return
 
-        if path == "/admin_reset_password":
-            cur_user = self.get_current_user()
-            if not cur_user or str(cur_user).lower() != "admin":
-                return self.responder_error("Permissão negada.")
-            target = campos.get("target_user", [""])[0].strip()
-            if not target:
-                return self.responder_error("Selecione um usuário.")
-            users = load_users()
-            u = find_user(users, target)
-            if not u:
-                return self.responder_error("Usuário inexistente.")
+        if path == "/export_csv":
+            usuario, ok = self._requer_autenticacao_api()
+            if not ok:
+                return
 
-            # Remover hash e salt para forçar que o usuário defina nova senha no próximo login
-            if "password_hash" in u: u.pop("password_hash", None)
-            if "salt" in u: u.pop("salt", None)
-
-            save_users(users)
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
-            return
-
-        if path == "/admin_delete_user":
-            cur_user = self.get_current_user()
-            if not cur_user or str(cur_user).lower() != "admin":
-                return self.responder_error("Permissão negada.")
-            target = campos.get("target_user", [""])[0].strip()
-            if not target:
-                return self.responder_error("Selecione um usuário.")
-            if target.lower() == "admin":
-                return self.responder_error("Não é permitido excluir o usuário admin.")
-            users = load_users()
-            users = [x for x in users if x.get("username","").strip().lower() != target.lower()]
-            save_users(users)
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
-            return
-
-        # ---------- User actions (all authenticated users allowed) ----------
-
-        elif path == "/lista":
-            with open(ARQUIVO, "r", encoding="utf-8") as f:
-                registros = json.load(f)
-            self.responder(gerar_pagina_lista(registros, cur_user))
-            return
-
-        elif path == "/export_csv":
-            # carregar registros e aplicar filtros vindos via querystring
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
 
-            # parse query
+            # parse query string
             qs = {}
             try:
                 qs = parse_qs(urlparse(self.path).query)
@@ -2664,14 +2599,11 @@ class Servidor(BaseHTTPRequestHandler):
             def has(key):
                 return key in qs and qs.get(key)
 
-            # START filtering
             filtered = list(registros)
 
-            # if 'Todos' selected -> export all (não filtra)
             if has('f_all'):
                 filtered = list(registros)
             else:
-                # Manual: list of ids to keep (if provided)
                 if has('f_manual') and qs.get('manual_ids'):
                     ids = []
                     try:
@@ -2680,67 +2612,56 @@ class Servidor(BaseHTTPRequestHandler):
                         ids = []
                     filtered = [r for r in filtered if (r.get('id') is not None and int(r.get('id')) in ids)]
 
-                # tipo filter
                 if has('f_tipo') and qs.get('tipo_value'):
                     tipo_v = qs.get('tipo_value', [''])[0].strip()
                     if tipo_v:
                         filtered = [r for r in filtered if (str(r.get('tipo','')) == tipo_v)]
 
-                # responsavel
                 if has('f_responsavel') and qs.get('responsavel_value'):
                     rv = qs.get('responsavel_value', [''])[0].strip().lower()
                     if rv:
                         filtered = [r for r in filtered if (str(r.get('responsavel','')).strip().lower() == rv)]
 
-                # emprestado_para (substring case-insensitive)
                 if has('f_emprestado_para') and qs.get('emprestado_para_value'):
                     qv = qs.get('emprestado_para_value', [''])[0].strip().lower()
                     if qv:
                         filtered = [r for r in filtered if qv in str(r.get('emprestado_para','')).lower()]
 
-                # origem (substring)
                 if has('f_origem') and qs.get('origem_value'):
                     ov = qs.get('origem_value', [''])[0].strip().lower()
                     if ov:
                         filtered = [r for r in filtered if ov in str(r.get('origem','')).lower()]
 
-                # patrimonio (substring)
                 if has('f_patrimonio') and qs.get('patrimonio_value'):
                     pv = qs.get('patrimonio_value', [''])[0].strip().lower()
                     if pv:
                         filtered = [r for r in filtered if pv in str(r.get('patrimonio','')).lower()]
 
-                # workflow (substring)
                 if has('f_workflow') and qs.get('workflow_value'):
                     wv = qs.get('workflow_value', [''])[0].strip().lower()
                     if wv:
                         filtered = [r for r in filtered if wv in str(r.get('workflow','')).lower()]
 
-                # motivo (exact match)
                 if has('f_motivo') and qs.get('motivo_value'):
                     mv = qs.get('motivo_value', [''])[0].strip().lower()
                     if mv:
                         filtered = [r for r in filtered if str(r.get('motivo','')).strip().lower() == mv]
 
-                # hardware
                 if has('f_hardware') and qs.get('hardware_value'):
                     hv = qs.get('hardware_value', [''])[0].strip().lower()
                     if hv:
                         filtered = [r for r in filtered if str(r.get('hardware','')).strip().lower() == hv]
 
-                # marca (substring)
                 if has('f_marca') and qs.get('marca_value'):
                     mvv = qs.get('marca_value', [''])[0].strip().lower()
                     if mvv:
                         filtered = [r for r in filtered if mvv in str(r.get('marca','')).lower()]
 
-                # modelo (substring)
                 if has('f_modelo') and qs.get('modelo_value'):
                     modv = qs.get('modelo_value', [''])[0].strip().lower()
                     if modv:
                         filtered = [r for r in filtered if modv in str(r.get('modelo','')).lower()]
 
-                # date range on data_inicio
                 if has('f_data'):
                     from_s = qs.get('date_from', [''])[0].strip()
                     to_s = qs.get('date_to', [''])[0].strip()
@@ -2758,29 +2679,27 @@ class Servidor(BaseHTTPRequestHandler):
                             return True
                         filtered = [r for r in filtered if in_range(r)]
 
-            # campos do CSV (incluindo status)
-            campos = ["id", "tipo", "responsavel", "emprestado_para", "origem", "patrimonio", "workflow", "motivo",
-                      "hardware", "marca", "modelo", "data_inicio", "data_retorno", "devolvido", "estoque",
-                      "status", "client_ip", "registrado_em"]
+            campos_csv = ["id", "tipo", "responsavel", "emprestado_para", "origem", "patrimonio", "workflow", "motivo",
+                          "hardware", "marca", "modelo", "data_inicio", "data_retorno", "devolvido", "estoque",
+                          "status", "client_ip", "registrado_em"]
 
             from io import StringIO
-            csv_buffer = StringIO();
-            writer = csv.DictWriter(csv_buffer, fieldnames=campos)
+            csv_buffer = StringIO()
+            writer = csv.DictWriter(csv_buffer, fieldnames=campos_csv)
             writer.writeheader()
             for r in filtered:
-                row = {k: (r.get(k, "") if r.get(k, "") is not None else "") for k in campos 
+                row = {k: (r.get(k, "") if r.get(k, "") is not None else "") for k in campos_csv
                        if k not in ("client_ip", "registrado_em", "status")}
                 oculto = r.get("oculto_meta", {}) or {}
                 row["client_ip"] = oculto.get("client_ip", "")
                 row["registrado_em"] = oculto.get("registrado_em", "")
                 row["estoque"] = "Sim" if r.get("estoque") else "Não"
                 row["devolvido"] = "Sim" if r.get("devolvido") else "Não"
-                # Adiciona o status calculado
                 row["status"] = calcular_status(r)
                 writer.writerow(row)
 
-            csv_data = csv_buffer.getvalue();
-            csv_buffer.close();
+            csv_data = csv_buffer.getvalue()
+            csv_buffer.close()
 
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
@@ -2789,19 +2708,24 @@ class Servidor(BaseHTTPRequestHandler):
             self.wfile.write(csv_data.encode("utf-8"))
             return
 
-        elif path == "/atrasos":
-            # retorna o HTML do mini painel (inclui atrasos no topo)
+        # ---------- Rotas de página (redirecionam para login se não autenticado) ----------
+        if path in ("/", "/lista"):
+            cur_user = self.get_current_user()
+            if not cur_user:
+                self.redirect("/login")
+                return
+
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
-            html = gerar_pendencias_html(registros)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(html.encode("utf-8"))
+
+            if path == "/":
+                self.responder(gerar_html_form(registros, cur_user))
+            else:  # /lista
+                self.responder(gerar_pagina_lista(registros, cur_user))
             return
 
-        else:
-            self.send_error(404, "Página não encontrada")
+        # ---------- Qualquer outra rota -> 404 ----------
+        self.send_error(404, "Página não encontrada")
 
     def do_POST(self):
         tamanho = int(self.headers.get("Content-Length", 0))
@@ -2809,7 +2733,7 @@ class Servidor(BaseHTTPRequestHandler):
         campos = parse_qs(dados)
         path = self.path.split("?", 1)[0]
 
-        # permitir POST em /login sem autenticação (fluxo de login)
+        # ---------- Rota pública: /login ----------
         if path == "/login":
             username = campos.get("username", [""])[0].strip()
             password = campos.get("password", [""])[0]
@@ -2818,10 +2742,8 @@ class Servidor(BaseHTTPRequestHandler):
             users = load_users()
             user = find_user(users, username)
             if not user:
-                # usuário não existe -> erro
                 return self.responder_error("Usuário inexistente.")
 
-            # primeiro login: sem password_hash definido => define a senha
             if not user.get("password_hash"):
                 if not password or len(password) < 6:
                     return self.responder_error("Defina uma senha com pelo menos 6 caracteres.")
@@ -2836,7 +2758,6 @@ class Servidor(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            # valida senha existente
             if verify_password(password, user.get("salt",""), user.get("password_hash","")):
                 token = create_session(username)
                 self.send_response(303)
@@ -2847,12 +2768,15 @@ class Servidor(BaseHTTPRequestHandler):
             else:
                 return self.responder_error("Senha incorreta.")
 
-        path = self.path
+        # ---------- Todas as outras rotas POST exigem autenticação ----------
+        usuario = self.get_current_user()
+        if not usuario:
+            self.redirect("/login")
+            return
 
         # ---------- Admin actions (only admin allowed) ----------
         if path == "/admin_add_user":
-            cur_user = self.get_current_user()
-            if not cur_user or str(cur_user).lower() != "admin":
+            if str(usuario).lower() != "admin":
                 return self.responder_error("Permissão negada.")
             username = campos.get("username", [""])[0].strip()
             if not username:
@@ -2862,15 +2786,11 @@ class Servidor(BaseHTTPRequestHandler):
                 return self.responder_error("Usuário já existe.")
             users.append({"username": username})
             save_users(users)
-            # redirect back to main
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
+            self.redirect("/")
             return
 
         elif path == "/admin_reset_password":
-            cur_user = self.get_current_user()
-            if not cur_user or str(cur_user).lower() != "admin":
+            if str(usuario).lower() != "admin":
                 return self.responder_error("Permissão negada.")
             target = campos.get("target_user", [""])[0].strip()
             if not target:
@@ -2879,18 +2799,14 @@ class Servidor(BaseHTTPRequestHandler):
             u = find_user(users, target)
             if not u:
                 return self.responder_error("Usuário inexistente.")
-            # Remover hash e salt para forçar que o usuário defina nova senha no próximo login
-            if "password_hash" in u: u.pop("password_hash", None)
-            if "salt" in u: u.pop("salt", None)
+            u.pop("password_hash", None)
+            u.pop("salt", None)
             save_users(users)
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
+            self.redirect("/")
             return
 
         if path == "/admin_delete_user":
-            cur_user = self.get_current_user()
-            if not cur_user or str(cur_user).lower() != "admin":
+            if str(usuario).lower() != "admin":
                 return self.responder_error("Permissão negada.")
             target = campos.get("target_user", [""])[0].strip()
             if not target:
@@ -2900,11 +2816,10 @@ class Servidor(BaseHTTPRequestHandler):
             users = load_users()
             users = [x for x in users if x.get("username","").strip().lower() != target.lower()]
             save_users(users)
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
+            self.redirect("/")
             return
 
+        # ---------- Ações de movimentação ----------
         elif path == "/registrar":
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
@@ -2947,11 +2862,9 @@ class Servidor(BaseHTTPRequestHandler):
                     return self.responder_error("Descreva o hardware (campo obrigatório quando selecionar 'Outros').")
                 hardware = hardware_outros
 
-            # Validação do patrimônio - obrigatório para todos EXCETO "Teclado/Mouse"
             if hardware != "Teclado/Mouse" and not patrimonio:
                 return self.responder_error("Campo 'Patrimônio' é obrigatório para este hardware.")
-            
-            # Se for "Teclado/Mouse", o patrimônio pode ser vazio ou ter 7+ dígitos
+
             if patrimonio and not re.match(r'^\d{7,}$', patrimonio):
                 return self.responder_error("Patrimônio inválido. Digite apenas números e no mínimo 7 dígitos.")
 
@@ -2981,7 +2894,7 @@ class Servidor(BaseHTTPRequestHandler):
                 "observacao": observacao,
                 "observacoes": ([{
                     "text": observacao,
-                    "registrado_em": (normalize_br_datetime_str(campos.get("registrado_em", [""])[0]) 
+                    "registrado_em": (normalize_br_datetime_str(campos.get("registrado_em", [""])[0])
                                     or sp_now_str())
                 }] if observacao else [])
             }
@@ -2990,17 +2903,15 @@ class Servidor(BaseHTTPRequestHandler):
                 novo["emprestado_para"] = campos.get("emprestado_para", [""])[0]
                 novo["data_retorno"] = normalize_br_datetime_str(campos.get("data_retorno", [""])[0])
 
-            # --- Salva metadados do registro (IP + usuário) ---
             try:
                 client_ip = self.client_address[0] if hasattr(self, "client_address") else ""
             except:
                 client_ip = ""
 
-            current_user = self.get_current_user()  # obtém usuário logado
             novo["oculto_meta"] = {
                 "client_ip": client_ip,
                 "registrado_em": sp_now_str(),
-                "registrado_por": current_user if current_user else ""
+                "registrado_por": usuario
             }
 
             registros.append(novo)
@@ -3011,7 +2922,6 @@ class Servidor(BaseHTTPRequestHandler):
             self.redirect("/lista")
 
         elif path == "/retornar":
-            # nova rota que implementa "Retornar máquina" com comportamento diferente conforme tipo
             try:
                 id_reg = int(campos.get("id", ["0"])[0])
             except:
@@ -3019,7 +2929,6 @@ class Servidor(BaseHTTPRequestHandler):
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
 
-            # localizar registro original
             original = None
             for r in registros:
                 try:
@@ -3033,7 +2942,6 @@ class Servidor(BaseHTTPRequestHandler):
                 return self.responder_error("Registro não encontrado.")
 
             tipo_orig = original.get("tipo", "")
-            # se emprestimo: mantém função antiga (marcar devolvido True)
             if tipo_orig == "emprestimo":
                 updated = False
                 for r in registros:
@@ -3049,9 +2957,7 @@ class Servidor(BaseHTTPRequestHandler):
                 self.redirect("/lista")
                 return
 
-            # para entrada => criar SAÍDA; para saída => criar ENTRADA
             now_str = sp_now_str()
-            # gerar novo id
             maxid = 0
             for r in registros:
                 try:
@@ -3077,40 +2983,29 @@ class Servidor(BaseHTTPRequestHandler):
                 "estoque": False
             }
 
-            # --- Metadados com o usuário atual ---
-            current_user = self.get_current_user()
             novo["oculto_meta"] = {
                 "client_ip": original.get("oculto_meta", {}).get("client_ip", ""),
                 "registrado_em": sp_now_str(),
-                "registrado_por": current_user if current_user else ""
+                "registrado_por": usuario
             }
-            # manter campos específicos de empréstimo se existirem (mas normalmente não)
+
             if original.get("emprestado_para"):
                 novo["emprestado_para"] = original.get("emprestado_para", "")
 
-            # se novo tipo for emprestimo (não é o caso aqui, mas mantido)
             if novo["tipo"] == "emprestimo":
                 novo["data_retorno"] = original.get("data_retorno", "")
 
-            # anexa meta oculta ao novo (client_ip/reg)
-            novo["oculto_meta"] = {
-                "client_ip": original.get("oculto_meta", {}).get("client_ip", ""),
-                "registrado_em": sp_now_str()
-            }
-
-            # atualiza registro original: marca devolvido True, remove estoque e adiciona status_extra com novo id
             updated = False
             for r in registros:
                 try:
                     if int(r.get("id", 0)) == id_reg:
                         r["devolvido"] = True
-                        r["estoque"] = False  # Removes from stock
+                        r["estoque"] = False
                         r["status_extra"] = f"Devolvido (ID: {novo_id})"
                         updated = True
                         break
                 except:
                     pass
-            # adiciona novo registro
             registros.append(novo)
 
             with open(ARQUIVO, "w", encoding="utf-8") as f:
@@ -3130,7 +3025,6 @@ class Servidor(BaseHTTPRequestHandler):
             for r in registros:
                 try:
                     if int(r.get("id", 0)) == id_reg:
-                        # Alterna o estado de estoque
                         r["estoque"] = not r.get("estoque", False)
                         updated = True
                 except:
@@ -3142,7 +3036,10 @@ class Servidor(BaseHTTPRequestHandler):
             self.redirect("/lista")
 
         elif path == "/devolver":
-            id_reg = int(campos.get("id", ["0"])[0])
+            try:
+                id_reg = int(campos.get("id", ["0"])[0])
+            except:
+                id_reg = 0
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
 
@@ -3150,7 +3047,7 @@ class Servidor(BaseHTTPRequestHandler):
             for r in registros:
                 try:
                     if int(r.get("id", 0)) == id_reg:
-                        r["devolvido"] = True;
+                        r["devolvido"] = True
                         updated = True
                 except:
                     pass
@@ -3161,8 +3058,7 @@ class Servidor(BaseHTTPRequestHandler):
             self.redirect("/lista")
 
         elif path == "/restaurar":
-            cur_user = self.get_current_user()
-            if not cur_user or str(cur_user).lower() != "admin":
+            if str(usuario).lower() != "admin":
                 return self.responder_error("Permissão negada.")
             try:
                 id_reg = int(campos.get("id", ["0"])[0])
@@ -3184,10 +3080,6 @@ class Servidor(BaseHTTPRequestHandler):
             self.redirect("/lista")
 
         elif path == "/editar_registro":
-            current_user = self.get_current_user()
-            if not current_user:
-                return self.responder_error("Usuário não autenticado.")
-
             try:
                 id_reg = int(campos.get("id", ["0"])[0])
             except:
@@ -3196,7 +3088,6 @@ class Servidor(BaseHTTPRequestHandler):
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
 
-            # localizar o registro
             registro = None
             for r in registros:
                 if int(r.get("id", 0)) == id_reg:
@@ -3206,13 +3097,11 @@ class Servidor(BaseHTTPRequestHandler):
             if not registro:
                 return self.responder_error("Registro não encontrado.")
 
-            # ---------- VERIFICAÇÃO DE PERMISSÃO ----------
-            is_admin = (current_user and str(current_user).lower() == "admin")
+            is_admin = (usuario and str(usuario).lower() == "admin")
             is_owner = False
             if not is_admin:
                 criador = registro.get("oculto_meta", {}).get("registrado_por")
-                if criador and str(criador).lower() == str(current_user).lower():
-                    # verifica prazo de 24h
+                if criador and str(criador).lower() == str(usuario).lower():
                     registrado_em_str = registro.get("oculto_meta", {}).get("registrado_em")
                     if registrado_em_str:
                         dt_registro = parse_br_datetime(registrado_em_str)
@@ -3220,54 +3109,45 @@ class Servidor(BaseHTTPRequestHandler):
                             agora = sp_now_naive()
                             diferenca = agora - dt_registro
                             if diferenca.total_seconds() < 24 * 3600:
-                                # verifica se não há observações
                                 if not registro.get("observacoes"):
                                     is_owner = True
 
             if not (is_admin or is_owner):
                 return self.responder_error("Permissão negada.")
 
-            # ---------- FUNÇÕES AUXILIARES ----------
             def get_str_value(key, default=""):
                 return campos.get(key, [default])[0].strip()
 
             def get_bool_value(key):
                 return key in campos and campos[key][0].lower() in ("1", "true", "on", "yes")
 
-            # ---------- Dicionário para armazenar APENAS as alterações ----------
             alteracoes = {}
 
-            # ----- 1. Tipo -----
             new_tipo = get_str_value("tipo")
             if new_tipo and new_tipo != registro.get("tipo"):
                 alteracoes["tipo"] = registro.get("tipo", "")
                 registro["tipo"] = new_tipo
 
-            # ----- 2. Responsável -----
             new_responsavel = get_str_value("responsavel")
             if new_responsavel and new_responsavel != registro.get("responsavel"):
                 alteracoes["responsavel"] = registro.get("responsavel", "")
                 registro["responsavel"] = new_responsavel
 
-            # ----- 3. Patrimônio -----
             new_patrimonio = get_str_value("patrimonio")
             if new_patrimonio != registro.get("patrimonio", ""):
                 alteracoes["patrimonio"] = registro.get("patrimonio", "")
                 registro["patrimonio"] = new_patrimonio
 
-            # ----- 4. Workflow -----
             new_workflow = get_str_value("workflow")
             if new_workflow != registro.get("workflow", ""):
                 alteracoes["workflow"] = registro.get("workflow", "")
                 registro["workflow"] = new_workflow
 
-            # ----- 5. Origem -----
             new_origem = get_str_value("origem")
             if new_origem != registro.get("origem", ""):
                 alteracoes["origem"] = registro.get("origem", "")
                 registro["origem"] = new_origem
 
-            # ----- 6. Motivo (com tratamento do "outros") -----
             motivo_select = get_str_value("motivo")
             if motivo_select == "outros":
                 new_motivo = get_str_value("motivo_outros")
@@ -3277,7 +3157,6 @@ class Servidor(BaseHTTPRequestHandler):
                 alteracoes["motivo"] = registro.get("motivo", "")
                 registro["motivo"] = new_motivo
 
-            # ----- 7. Hardware (com tratamento do "outros") -----
             hardware_select = get_str_value("hardware")
             if hardware_select == "outros":
                 new_hardware = get_str_value("hardware_outros")
@@ -3287,53 +3166,44 @@ class Servidor(BaseHTTPRequestHandler):
                 alteracoes["hardware"] = registro.get("hardware", "")
                 registro["hardware"] = new_hardware
 
-            # ----- 8. Marca -----
             new_marca = get_str_value("marca")
             if new_marca != registro.get("marca", ""):
                 alteracoes["marca"] = registro.get("marca", "")
                 registro["marca"] = new_marca
 
-            # ----- 9. Modelo -----
             new_modelo = get_str_value("modelo")
             if new_modelo != registro.get("modelo", ""):
                 alteracoes["modelo"] = registro.get("modelo", "")
                 registro["modelo"] = new_modelo
 
-            # ----- 10. Emprestado para -----
             new_emprestado_para = get_str_value("emprestado_para")
             if new_emprestado_para != registro.get("emprestado_para", ""):
                 alteracoes["emprestado_para"] = registro.get("emprestado_para", "")
                 registro["emprestado_para"] = new_emprestado_para
 
-            # ----- 11. Data início -----
             new_data_inicio = normalize_br_datetime_str(get_str_value("data_inicio")) or ""
             if new_data_inicio != registro.get("data_inicio", ""):
                 alteracoes["data_inicio"] = registro.get("data_inicio", "")
                 registro["data_inicio"] = new_data_inicio
 
-            # ----- 12. Data retorno -----
             new_data_retorno = normalize_br_datetime_str(get_str_value("data_retorno")) or ""
             if new_data_retorno != registro.get("data_retorno", ""):
                 alteracoes["data_retorno"] = registro.get("data_retorno", "")
                 registro["data_retorno"] = new_data_retorno
 
-            # ----- 13. Devolvido (booleano) -----
             new_devolvido = get_bool_value("devolvido")
             if new_devolvido != registro.get("devolvido", False):
                 alteracoes["devolvido"] = registro.get("devolvido", False)
                 registro["devolvido"] = new_devolvido
 
-            # ----- 14. Estoque (booleano) -----
             new_estoque = get_bool_value("estoque")
             if new_estoque != registro.get("estoque", False):
                 alteracoes["estoque"] = registro.get("estoque", False)
                 registro["estoque"] = new_estoque
 
-            # ---------- Se houver alterações, salva no histórico ----------
             if alteracoes:
-                # Adiciona metadados da edição
                 alteracoes["registrado_em_snapshot"] = sp_now_str()
-                alteracoes["edited_by"] = str(current_user)
+                alteracoes["edited_by"] = str(usuario)
 
                 if "oculto_meta" not in registro or not isinstance(registro.get("oculto_meta"), dict):
                     registro["oculto_meta"] = {}
@@ -3341,14 +3211,16 @@ class Servidor(BaseHTTPRequestHandler):
                     registro["oculto_meta"]["edicoes"] = []
                 registro["oculto_meta"]["edicoes"].append(alteracoes)
 
-                # Salva o arquivo
                 with open(ARQUIVO, "w", encoding="utf-8") as f:
                     json.dump(registros, f, ensure_ascii=False, indent=4)
 
             self.redirect("/lista")
 
         elif path == "/ocultar":
-            id_reg = int(campos.get("id", ["0"])[0])
+            try:
+                id_reg = int(campos.get("id", ["0"])[0])
+            except:
+                id_reg = 0
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 registros = json.load(f)
 
@@ -3367,7 +3239,10 @@ class Servidor(BaseHTTPRequestHandler):
             self.redirect("/lista")
 
         elif path == "/estender":
-            id_reg = int(campos.get("id", ["0"])[0])
+            try:
+                id_reg = int(campos.get("id", ["0"])[0])
+            except:
+                id_reg = 0
             nova_data_raw = campos.get("data_retorno", [""])[0]
             nova_data_br = normalize_br_datetime_str(nova_data_raw)
 
@@ -3378,7 +3253,7 @@ class Servidor(BaseHTTPRequestHandler):
             for r in registros:
                 try:
                     if int(r.get("id", 0)) == id_reg:
-                        r["data_retorno"] = nova_data_br;
+                        r["data_retorno"] = nova_data_br
                         updated = True
                 except:
                     pass
@@ -3394,7 +3269,6 @@ class Servidor(BaseHTTPRequestHandler):
             except:
                 id_reg = 0
             texto = campos.get("texto", [""])[0].strip()
-            # preferir data enviada pelo cliente (registrado_em); fallback para server time
             reg_raw = campos.get("registrado_em", [""])[0].strip()
             reg_norm = normalize_br_datetime_str(reg_raw) or sp_now_str()
 
@@ -3428,7 +3302,6 @@ class Servidor(BaseHTTPRequestHandler):
 
         else:
             self.send_error(404, "Ação desconhecida")
-
     # ---------------- authentication helpers (dentro de Servidor) ----------------
     def _get_cookie(self, name):
         cookie = self.headers.get("Cookie", "")
@@ -3486,6 +3359,16 @@ class Servidor(BaseHTTPRequestHandler):
         self.send_header("Location", url)
         self.end_headers()
 
+    def _requer_autenticacao_api(self):
+        """Retorna (usuario, None) se autenticado, senão envia 401 e retorna (None, False)."""
+        usuario = self.get_current_user()
+        if not usuario:
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"erro": "Nao autenticado"}')
+            return None, False
+        return usuario, True
 
 if __name__ == "__main__":
     server_address = ('', 8000)
@@ -3497,5 +3380,4 @@ if __name__ == "__main__":
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
-
     httpd.server_close()
